@@ -1,0 +1,31 @@
+# Sensitive data
+config.json
+cookie.txt
+
+# Cached data and outputs
+raw_data/
+*.csv
+trends.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Generator script (not needed at runtime)
+_generate_country_codes.py
+
+# Debug scripts
+debug_game_structure.py
+
+# OS files
+.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# Claude
+.claude/
