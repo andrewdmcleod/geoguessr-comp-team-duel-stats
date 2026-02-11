@@ -15,14 +15,21 @@ import csv
 import argparse
 import time
 import os
+import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 
 import requests
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+
+try:
+    import questionary
+    HAS_QUESTIONARY = True
+except ImportError:
+    HAS_QUESTIONARY = False
 
 from country_codes import country_name_from_code, CODE_TO_REGION
 
@@ -30,6 +37,7 @@ from country_codes import country_name_from_code, CODE_TO_REGION
 # CSV column order (30 columns)
 # ---------------------------------------------------------------------------
 CSV_COLUMNS = [
+    'team_key',
     'game_id', 'game_date', 'round', 'total_rounds',
     'competitive_mode', 'move_mode',
     'player_id', 'player_name',
@@ -415,7 +423,8 @@ class ReverseGeocoder:
 
 def process_game_data(game: Dict, team_members: Dict[str, str],
                       geocoder: ReverseGeocoder, user_id: str,
-                      my_team_only: bool = False) -> List[Dict]:
+                      my_team_only: bool = False,
+                      team_key: str = '') -> List[Dict]:
     """Process a single game and extract player stats.
 
     When my_team_only is True, only geocode/output rows for the user's team
@@ -575,6 +584,7 @@ def process_game_data(game: Dict, team_members: Dict[str, str],
                     game_won = team_obj.get('health', 0) > 0
 
                 raw_rows.append({
+                    'team_key': team_key,
                     'game_id': game_id,
                     'game_date': game_date,
                     'round': round_num,
@@ -683,6 +693,179 @@ def migrate_old_rows(old_rows: list, old_columns: list) -> list:
 
 
 # ===================================================================
+# Multi-team detection & configuration
+# ===================================================================
+
+def make_team_key(player_ids) -> str:
+    """Create a stable team key from a collection of player IDs."""
+    return '_'.join(sorted(player_ids))
+
+
+def discover_teams(game_details: Dict[str, Dict], user_id: str) -> Dict[str, Dict]:
+    """Scan all games to find unique team compositions for the user.
+
+    Returns {team_key: {"player_ids": set, "game_ids": list}}.
+    """
+    teams = {}
+    for game_id, game in game_details.items():
+        for team in game.get('teams', []):
+            pids = {p.get('playerId') for p in team.get('players', [])}
+            if user_id in pids:
+                key = make_team_key(pids)
+                if key not in teams:
+                    teams[key] = {"player_ids": pids, "game_ids": []}
+                teams[key]["game_ids"].append(game_id)
+                break
+    return teams
+
+
+def load_teams_config(path: str) -> Optional[Dict]:
+    """Load teams_config.json, return None if not found."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def save_teams_config(config: Dict, path: str):
+    """Save teams configuration to JSON."""
+    with open(path, 'w') as f:
+        json.dump(config, f, indent=2)
+    print(f"  \U0001f4be Teams config saved to {path}")
+
+
+def reconcile_teams(discovered: Dict, saved_config: Optional[Dict]) -> Tuple[Optional[Dict], List[str], List[str]]:
+    """Compare discovered teams against saved config.
+
+    Returns (saved_config, new_team_keys, deleted_team_keys).
+    """
+    discovered_keys = set(discovered.keys())
+
+    if saved_config is None:
+        return None, sorted(discovered_keys), []
+
+    saved_keys = {t["team_key"] for t in saved_config.get("teams", [])}
+    new_keys = sorted(discovered_keys - saved_keys)
+    deleted_keys = sorted(saved_keys - discovered_keys)
+
+    return saved_config, new_keys, deleted_keys
+
+
+def show_teams_menu(discovered_teams: Dict, player_names: Dict[str, str],
+                    existing_config: Optional[Dict],
+                    default_my_team_only: bool = False,
+                    default_reverse_geocode: bool = True) -> Dict:
+    """Interactive menu for configuring team settings using questionary."""
+    if not HAS_QUESTIONARY:
+        print("\u274c 'questionary' package required for team menu.")
+        print("   Install with: pip install questionary")
+        print("   Or use --no-teams-menu for non-interactive mode.")
+        sys.exit(1)
+
+    print(f"\n{'=' * 50}")
+    print("\U0001f3af TEAM CONFIGURATION")
+    print(f"{'=' * 50}")
+
+    # Build team info list
+    teams_list = []
+    for team_key, team_data in sorted(discovered_teams.items()):
+        pids = sorted(team_data["player_ids"])
+        names = [player_names.get(pid, pid[:8] + '...') for pid in pids]
+        label = " + ".join(names)
+        game_count = len(team_data["game_ids"])
+
+        # Check for existing saved settings
+        existing_entry = None
+        if existing_config:
+            for t in existing_config.get("teams", []):
+                if t["team_key"] == team_key:
+                    existing_entry = t
+                    break
+
+        teams_list.append({
+            "team_key": team_key,
+            "player_ids": pids,
+            "names": names,
+            "label": label,
+            "game_count": game_count,
+            "existing": existing_entry,
+        })
+
+    # Display teams
+    print(f"\nFound {len(teams_list)} team composition(s):\n")
+    for i, t in enumerate(teams_list, 1):
+        status = ""
+        if t["existing"]:
+            status = " [configured]"
+        elif existing_config:
+            status = " [NEW]"
+        print(f"  {i}. {t['label']} ({t['game_count']} games){status}")
+
+    # Step 1: Select which teams to enable
+    choices = []
+    for t in teams_list:
+        checked = t["existing"]["enabled"] if t["existing"] else True
+        choices.append(questionary.Choice(
+            title=f"{t['label']} ({t['game_count']} games)",
+            value=t["team_key"],
+            checked=checked,
+        ))
+
+    enabled_keys = questionary.checkbox(
+        "\nSelect teams to enable (space to toggle, enter to confirm):",
+        choices=choices,
+    ).ask()
+
+    if enabled_keys is None:
+        print("\nCancelled.")
+        sys.exit(0)
+
+    # Step 2: Per-team settings for enabled teams
+    result_teams = []
+    for t in teams_list:
+        enabled = t["team_key"] in enabled_keys
+
+        if enabled and not t["existing"]:
+            # New team — ask for settings
+            print(f"\n  Configuring: {t['label']}")
+
+            my_team_only = questionary.confirm(
+                f"    Only include your team's guesses (my_team_only)?",
+                default=default_my_team_only,
+            ).ask()
+            if my_team_only is None:
+                sys.exit(0)
+
+            reverse_geocode = questionary.confirm(
+                f"    Enable reverse geocoding?",
+                default=default_reverse_geocode,
+            ).ask()
+            if reverse_geocode is None:
+                sys.exit(0)
+
+        elif t["existing"]:
+            # Keep existing settings
+            my_team_only = t["existing"].get("my_team_only", default_my_team_only)
+            reverse_geocode = t["existing"].get("reverse_geocode", default_reverse_geocode)
+        else:
+            # Disabled team — use defaults
+            my_team_only = default_my_team_only
+            reverse_geocode = default_reverse_geocode
+
+        result_teams.append({
+            "team_key": t["team_key"],
+            "player_ids": t["player_ids"],
+            "player_names": {pid: player_names.get(pid, pid) for pid in t["player_ids"]},
+            "enabled": enabled,
+            "my_team_only": my_team_only,
+            "reverse_geocode": reverse_geocode,
+        })
+
+    return {"teams": result_teams, "version": 1}
+
+
+# ===================================================================
 # Main
 # ===================================================================
 
@@ -701,7 +884,13 @@ def main():
     parser.add_argument('--geocode-delay', type=float, default=None,
                         help='Delay between geocoding requests in seconds (default: auto per provider)')
     parser.add_argument('--my-team-only', action='store_true',
-                        help='Only include guesses from you and your teammate')
+                        help='(Deprecated) Use teams_config.json per-team settings instead. '
+                             'Sets default my_team_only for first-run team config.')
+    parser.add_argument('--no-teams-menu', action='store_true',
+                        help='Non-interactive mode. Errors if new teams are detected '
+                             'that require configuration.')
+    parser.add_argument('--teams-config', type=str, default='teams_config.json',
+                        help='Path to teams configuration file (default: teams_config.json)')
     args = parser.parse_args()
 
     # Ensure raw data dirs exist
@@ -786,6 +975,148 @@ def main():
     if existing_game_ids:
         print(f"   {len(new_game_ids)} new game(s) to process ({len(existing_game_ids)} already in CSV)")
 
+    # ================================================================
+    # Phase 1: Load ALL game details (cached + new) for team discovery
+    # ================================================================
+    print(f"\n\u2699\ufe0f  Loading game data for team discovery...")
+    all_game_details = {}
+
+    # Load cached game data for existing game IDs (needed for team discovery)
+    if existing_game_ids:
+        loaded_cached = 0
+        for gid in existing_game_ids:
+            cache_file = RAW_GAMES_DIR / f"{gid}.json"
+            if cache_file.exists():
+                with open(cache_file) as f:
+                    all_game_details[gid] = json.load(f)
+                    loaded_cached += 1
+        if loaded_cached:
+            print(f"   Loaded {loaded_cached} cached games")
+
+    # Fetch new games from API (or cache)
+    for idx, game_id in enumerate(new_game_ids, 1):
+        cached = (RAW_GAMES_DIR / f"{game_id}.json").exists()
+        src = "cached" if cached else "API"
+        print(f"  [{idx}/{len(new_game_ids)}] Loading game {game_id} ({src})...")
+        try:
+            game = api.get_game_details(game_id)
+            all_game_details[game_id] = game
+        except Exception as e:
+            print(f"  \u26a0\ufe0f  Error loading game: {e}")
+            continue
+
+    # Collect all player IDs from all games
+    for game in all_game_details.values():
+        for team in game.get('teams', []):
+            for player in team.get('players', []):
+                pid = player.get('playerId')
+                if pid and pid not in all_team_members:
+                    all_team_members[pid] = pid
+
+    # ================================================================
+    # Phase 2: Fetch player nicknames (needed for team display)
+    # ================================================================
+    players_without_names = [pid for pid, name in all_team_members.items() if pid == name]
+    if players_without_names:
+        print(f"\n\U0001f465 Fetching nicknames for {len(players_without_names)} players...")
+        for player_id in players_without_names:
+            try:
+                pprofile = api.get_player_profile(player_id)
+                nickname = pprofile.get('nick', player_id)
+                all_team_members[player_id] = nickname
+                time.sleep(0.2)
+            except Exception:
+                pass
+
+    # ================================================================
+    # Phase 3: Discover teams
+    # ================================================================
+    discovered_teams = discover_teams(all_game_details, user_id)
+    print(f"\n\U0001f50d Discovered {len(discovered_teams)} unique team composition(s)")
+    for tk, td in sorted(discovered_teams.items()):
+        names = [all_team_members.get(pid, pid[:8] + '...') for pid in sorted(td["player_ids"])]
+        print(f"   {' + '.join(names)} ({len(td['game_ids'])} games)")
+
+    # ================================================================
+    # Phase 4: Resolve team config
+    # ================================================================
+    teams_config_path = args.teams_config
+    saved_config = load_teams_config(teams_config_path)
+    saved_config, new_team_keys, deleted_team_keys = reconcile_teams(
+        discovered_teams, saved_config
+    )
+
+    if len(discovered_teams) == 1 and saved_config is None:
+        # Single team shortcut — auto-generate config without menu
+        team_key = list(discovered_teams.keys())[0]
+        team_data = discovered_teams[team_key]
+        pids = sorted(team_data["player_ids"])
+        names = [all_team_members.get(pid, pid) for pid in pids]
+        print(f"\n\u2705 Single team detected: {' + '.join(names)}")
+
+        teams_config = {
+            "teams": [{
+                "team_key": team_key,
+                "player_ids": pids,
+                "player_names": {pid: all_team_members.get(pid, pid) for pid in pids},
+                "enabled": True,
+                "my_team_only": args.my_team_only,
+                "reverse_geocode": not args.no_geocode,
+            }],
+            "version": 1,
+        }
+        save_teams_config(teams_config, teams_config_path)
+
+    elif new_team_keys or deleted_team_keys or saved_config is None:
+        # Changes detected or first run with multiple teams — need config update
+
+        if deleted_team_keys:
+            print(f"\n\u26a0\ufe0f  {len(deleted_team_keys)} team(s) no longer found in games:")
+            for key in deleted_team_keys:
+                print(f"   REMOVED: {key}")
+            # Auto-remove deleted teams from saved config
+            if saved_config:
+                saved_config["teams"] = [
+                    t for t in saved_config["teams"]
+                    if t["team_key"] not in deleted_team_keys
+                ]
+
+        if new_team_keys:
+            print(f"\n\u2728 {len(new_team_keys)} new team(s) discovered:")
+            for key in new_team_keys:
+                pids = sorted(discovered_teams[key]["player_ids"])
+                names = [all_team_members.get(pid, pid) for pid in pids]
+                print(f"   NEW: {' + '.join(names)}")
+
+        if args.no_teams_menu:
+            if new_team_keys:
+                print(f"\n\u274c Cannot proceed in --no-teams-menu mode with new teams.")
+                print(f"   Run without --no-teams-menu to configure, or edit {teams_config_path} manually.")
+                return
+            # Only deletions — save updated config and continue
+            if saved_config and deleted_team_keys:
+                save_teams_config(saved_config, teams_config_path)
+            teams_config = saved_config
+        else:
+            # Show interactive menu
+            teams_config = show_teams_menu(
+                discovered_teams,
+                all_team_members,
+                saved_config,
+                default_my_team_only=args.my_team_only,
+                default_reverse_geocode=not args.no_geocode,
+            )
+            save_teams_config(teams_config, teams_config_path)
+    else:
+        # No changes — use saved config
+        teams_config = saved_config
+        print(f"\n\u2705 Using team config from {teams_config_path}")
+
+    # ================================================================
+    # Phase 5: Per-team processing
+    # ================================================================
+
+    # No new games early exit (after team config is resolved)
     if not new_game_ids and existing_rows:
         print("\n\u2705 No new games to fetch! CSV is up to date.")
         # Still migrate if needed
@@ -800,63 +1131,85 @@ def main():
         print(f"\n\U0001f389 Done!")
         return
 
-    # Process games
-    print(f"\n\u2699\ufe0f  Processing game data...")
-    if not args.no_geocode:
-        print(f"   (Reverse geocoding enabled - {args.geo_provider}, {geocoder.delay}s delay)")
-    else:
-        print(f"   (Geocoding disabled)")
+    # Build team_key -> set of game_ids mapping
+    team_game_ids = {}
+    for game_id, game in all_game_details.items():
+        for team in game.get('teams', []):
+            pids = {p.get('playerId') for p in team.get('players', [])}
+            if user_id in pids:
+                key = make_team_key(pids)
+                if key not in team_game_ids:
+                    team_game_ids[key] = set()
+                team_game_ids[key].add(game_id)
+                break
+
+    enabled_teams = [t for t in teams_config["teams"] if t["enabled"]]
+
+    if not enabled_teams:
+        print("\n\u26a0\ufe0f  No teams enabled! Enable at least one team in teams_config.json.")
+        return
+
+    print(f"\n\u2699\ufe0f  Processing {len(enabled_teams)} enabled team(s)...")
 
     new_rows = []
 
-    for idx, game_id in enumerate(new_game_ids, 1):
-        cached = (RAW_GAMES_DIR / f"{game_id}.json").exists()
-        src = "cached" if cached else "API"
-        print(f"\n  [{idx}/{len(new_game_ids)}] Fetching game {game_id} ({src})...")
+    for team_cfg in enabled_teams:
+        team_key = team_cfg["team_key"]
+        team_pids = set(team_cfg["player_ids"])
+        my_team_only = team_cfg.get("my_team_only", False)
+        reverse_geocode = team_cfg.get("reverse_geocode", True)
 
-        try:
-            game = api.get_game_details(game_id)
+        team_gids = team_game_ids.get(team_key, set())
+        new_team_gids = team_gids & set(new_game_ids)
 
-            # Collect player IDs
-            for team in game.get('teams', []):
-                for player in team.get('players', []):
-                    pid = player.get('playerId')
-                    if pid and pid not in all_team_members:
-                        all_team_members[pid] = pid
-
-            rows = process_game_data(
-                game, all_team_members, geocoder, user_id,
-                my_team_only=args.my_team_only
-            )
-            new_rows.extend(rows)
-
-            n_rounds = game.get('currentRoundNumber', len(game.get('rounds', [])))
-            print(f"  \u2705 Extracted {len(rows)} guesses from {n_rounds} rounds")
-
-        except Exception as e:
-            print(f"  \u26a0\ufe0f  Error processing game: {e}")
+        if not new_team_gids:
             continue
 
-    # Fetch nicknames for players we don't have yet
-    if args.my_team_only:
-        # Only fetch names for our team
-        players_without_names = [
-            pid for pid, name in all_team_members.items()
-            if pid == name
-        ]
-    else:
-        players_without_names = [pid for pid, name in all_team_members.items() if pid == name]
+        names = [all_team_members.get(pid, pid) for pid in sorted(team_pids)]
+        print(f"\n  \U0001f465 Team: {' + '.join(names)} ({len(new_team_gids)} new games)")
+        print(f"     my_team_only={my_team_only}, reverse_geocode={reverse_geocode}")
 
-    if players_without_names:
-        print(f"\n\U0001f465 Fetching nicknames for {len(players_without_names)} players...")
-        for player_id in players_without_names:
+        # Create team-specific geocoder if reverse_geocode differs from global
+        if reverse_geocode and args.no_geocode:
+            # Team wants geocoding but global flag disabled it — create a new geocoder
             try:
-                profile = api.get_player_profile(player_id)
-                nickname = profile.get('nick', player_id)
-                all_team_members[player_id] = nickname
-                time.sleep(0.2)
-            except Exception:
-                pass
+                team_geocoder = ReverseGeocoder(
+                    enable_geocoding=True,
+                    delay=args.geocode_delay,
+                    provider_name=args.geo_provider,
+                    config=config
+                )
+            except ValueError as e:
+                print(f"  \u26a0\ufe0f  Cannot enable geocoding for this team: {e}")
+                team_geocoder = geocoder
+        elif not reverse_geocode:
+            # Team doesn't want geocoding — use disabled geocoder
+            team_geocoder = ReverseGeocoder(enable_geocoding=False)
+        else:
+            team_geocoder = geocoder
+
+        for game_id in sorted(new_team_gids):
+            game = all_game_details.get(game_id)
+            if not game:
+                continue
+
+            cached = True  # Already loaded into all_game_details
+            print(f"\n    [{game_id}]")
+
+            try:
+                rows = process_game_data(
+                    game, all_team_members, team_geocoder, user_id,
+                    my_team_only=my_team_only,
+                    team_key=team_key,
+                )
+                new_rows.extend(rows)
+
+                n_rounds = game.get('currentRoundNumber', len(game.get('rounds', [])))
+                print(f"    \u2705 Extracted {len(rows)} guesses from {n_rounds} rounds")
+
+            except Exception as e:
+                print(f"    \u26a0\ufe0f  Error processing game: {e}")
+                continue
 
     # Update names in new rows
     for row in new_rows:

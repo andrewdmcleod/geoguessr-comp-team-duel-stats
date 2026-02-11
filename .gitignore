@@ -1,6 +1,7 @@
 # Sensitive data
 config.json
 cookie.txt
+teams_config.json
 
 # Cached data and outputs
 raw_data/
