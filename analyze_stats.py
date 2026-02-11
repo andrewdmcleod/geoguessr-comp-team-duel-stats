@@ -12,6 +12,7 @@ Provides comprehensive analysis of player performance including:
 """
 
 import json
+import math
 import pandas as pd
 import argparse
 from pathlib import Path
@@ -95,8 +96,23 @@ def accuracy_ranking(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def speed_ranking(df: pd.DataFrame) -> pd.DataFrame:
-    """Rank players by speed"""
+    """Rank players by speed.
+
+    Excludes likely timeout/no-pin guesses:
+    - time_seconds == 0 (no data)
+    - score == 0 (no meaningful guess placed)
+    - distance > 10,000 km (effectively random / no pin)
+    """
     df_timed = df[df['time_seconds'] > 0]
+
+    # Exclude score == 0 (timeout / no pin) if score column exists
+    if 'score' in df_timed.columns:
+        df_timed = df_timed[df_timed['score'] > 0]
+
+    # Exclude extreme distances (> 10,000 km suggests no meaningful guess)
+    if 'distance_km' in df_timed.columns:
+        df_timed = df_timed[df_timed['distance_km'] <= 10000]
+
     if len(df_timed) == 0:
         return pd.DataFrame()
 
@@ -110,8 +126,12 @@ def speed_ranking(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def speed_vs_accuracy(df: pd.DataFrame) -> pd.DataFrame:
-    """Compare speed vs accuracy"""
+    """Compare speed vs accuracy (excludes timeouts/no-pin guesses)"""
     df_timed = df[df['time_seconds'] > 0]
+    if 'score' in df_timed.columns:
+        df_timed = df_timed[df_timed['score'] > 0]
+    if 'distance_km' in df_timed.columns:
+        df_timed = df_timed[df_timed['distance_km'] <= 10000]
     if len(df_timed) == 0:
         return pd.DataFrame()
 
@@ -175,32 +195,46 @@ def player_win_loss_split(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     return out.reset_index()
 
 
-def won_team_stats(df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    """How often each player beat their teammate"""
+def won_team_stats(df: pd.DataFrame, by_move_mode: bool = False) -> Optional[pd.DataFrame]:
+    """How often each player beat their teammate.
+
+    If by_move_mode=True, returns a separate breakdown per move mode.
+    """
     if 'won_team' not in df.columns or df['won_team'].isna().all():
         return None
 
     valid = df[df['won_team'].notna()]
-    result = valid.groupby('player_name').agg(
+    group_cols = ['player_name']
+    if by_move_mode and 'move_mode' in valid.columns:
+        group_cols.append('move_mode')
+
+    result = valid.groupby(group_cols).agg(
         rounds_won=('won_team', 'sum'),
         total_rounds=('won_team', 'count')
     )
     result['win_pct'] = (result['rounds_won'] / result['total_rounds'] * 100).round(1)
-    return result.reset_index().sort_values('win_pct', ascending=False)
+    return result.reset_index().sort_values(group_cols + ['win_pct'], ascending=[True] * len(group_cols) + [False])
 
 
-def won_round_stats(df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    """How often each player had the best guess across all teams"""
+def won_round_stats(df: pd.DataFrame, by_move_mode: bool = False) -> Optional[pd.DataFrame]:
+    """How often each player had the best guess across all teams.
+
+    If by_move_mode=True, returns a separate breakdown per move mode.
+    """
     if 'won_round' not in df.columns or df['won_round'].isna().all():
         return None
 
     valid = df[df['won_round'].notna()]
-    result = valid.groupby('player_name').agg(
+    group_cols = ['player_name']
+    if by_move_mode and 'move_mode' in valid.columns:
+        group_cols.append('move_mode')
+
+    result = valid.groupby(group_cols).agg(
         rounds_won=('won_round', 'sum'),
         total_rounds=('won_round', 'count')
     )
     result['win_pct'] = (result['rounds_won'] / result['total_rounds'] * 100).round(1)
-    return result.reset_index().sort_values('win_pct', ascending=False)
+    return result.reset_index().sort_values(group_cols + ['win_pct'], ascending=[True] * len(group_cols) + [False])
 
 
 def region_performance(df: pd.DataFrame) -> pd.DataFrame:
@@ -236,7 +270,9 @@ def best_worst_countries(df: pd.DataFrame, n: int = 10) -> tuple:
     perf = perf[perf['num_guesses'] >= 2].reset_index()
 
     best = perf.sort_values('avg_dist_km').groupby('player_name').head(n)
+    best = best.sort_values(['player_name', 'avg_dist_km'])
     worst = perf.sort_values('avg_dist_km', ascending=False).groupby('player_name').head(n)
+    worst = worst.sort_values(['player_name', 'avg_dist_km'], ascending=[True, False])
     return best, worst
 
 
@@ -258,7 +294,7 @@ def countries_i_confuse(df: pd.DataFrame) -> pd.DataFrame:
     confusion = df_valid.groupby(
         ['player_name', 'correct_country', 'guessed_country']
     ).size().reset_index(name='times')
-    confusion = confusion.sort_values('times', ascending=False)
+    confusion = confusion.sort_values(['player_name', 'times'], ascending=[True, False])
     return confusion
 
 
@@ -280,7 +316,13 @@ def countries_worth_studying(df: pd.DataFrame, n: int = 15) -> pd.DataFrame:
     perf['area_km2'] = perf['correct_country'].map(LARGE_COUNTRIES)
     perf = perf.dropna(subset=['area_km2'])
     perf['area_km2'] = perf['area_km2'].astype(int)
-    perf = perf.sort_values('avg_dist_km', ascending=False).head(n)
+
+    # Importance weight: combines how badly you perform with how often the country appears.
+    # Higher = more worth studying. Uses log(num_guesses) so a country appearing 100x
+    # isn't weighted 50x more than one appearing 2x, but still significantly more.
+    perf['importance'] = (perf['avg_dist_km'] * perf['num_guesses'].apply(math.log1p)).round(1)
+
+    perf = perf.sort_values('importance', ascending=False).head(n)
     return perf
 
 
@@ -488,11 +530,21 @@ def main():
         print_section("\U0001f91d WON TEAM (WITHIN-TEAM)", "how often each player beat their teammate")
         print(wt.to_string(index=False))
 
+        wt_move = won_team_stats(df, by_move_mode=True)
+        if wt_move is not None and 'move_mode' in wt_move.columns:
+            print(f"\n  By move mode:")
+            print(wt_move.to_string(index=False))
+
     # ---- Won Round (cross-team) ----
     wr = won_round_stats(df)
     if wr is not None:
         print_section("\U0001f451 WON ROUND (CROSS-TEAM)", "how often each player had the best guess in the round")
         print(wr.to_string(index=False))
+
+        wr_move = won_round_stats(df, by_move_mode=True)
+        if wr_move is not None and 'move_mode' in wr_move.columns:
+            print(f"\n  By move mode:")
+            print(wr_move.to_string(index=False))
 
     # ---- Region Performance ----
     print_section("\U0001f30d PERFORMANCE BY REGION",
@@ -510,19 +562,26 @@ def main():
 
     # ---- Countries I Confuse ----
     print_section("\U0001f500 COUNTRIES I CONFUSE",
-                  "When it was X, I guessed Y — top 20")
+                  "When it was X, I guessed Y — top 10 per player")
     confusion = countries_i_confuse(df)
     if not confusion.empty:
-        print(confusion.head(20).to_string(index=False))
+        top_per_player = confusion.groupby('player_name').head(10)
+        for player, pdata in top_per_player.groupby('player_name', sort=True):
+            print(f"\n  {player}:")
+            print(pdata[['correct_country', 'guessed_country', 'times']].to_string(index=False))
 
     # ---- Best/Worst Countries ----
     best, worst = best_worst_countries(df, n=10)
     if not best.empty:
         print_section("\u2b50 BEST COUNTRIES", "lowest avg distance per player, min 2 guesses")
-        print(best.to_string(index=False))
+        for player, pdata in best.groupby('player_name', sort=True):
+            print(f"\n  {player}:")
+            print(pdata[['correct_country', 'avg_dist_km', 'num_guesses']].to_string(index=False))
     if not worst.empty:
         print_section("\U0001f4a9 WORST COUNTRIES", "highest avg distance per player, min 2 guesses")
-        print(worst.to_string(index=False))
+        for player, pdata in worst.groupby('player_name', sort=True):
+            print(f"\n  {player}:")
+            print(pdata[['correct_country', 'avg_dist_km', 'num_guesses']].to_string(index=False))
 
     # ---- Countries Worth Studying ----
     worth = countries_worth_studying(df)
