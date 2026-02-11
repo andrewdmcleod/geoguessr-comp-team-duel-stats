@@ -18,8 +18,8 @@ Fetch and analyze your competitive team duel games from GeoGuessr. Exports detai
 ### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/andrewdmcleod/geoguessr-stats.git
-cd geoguessr-stats
+git clone https://github.com/andrewdmcleod/geoguessr-comp-team-duel-stats.git
+cd geoguessr-comp-team-duel-stats
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -45,7 +45,7 @@ cp cookie.txt.example cookie.txt
 }
 ```
 
-- **`player_id`**: Your GeoGuessr user ID. Find it by going to your profile page — it's the hex string in the URL (e.g. `geoguessr.com/user/695c3de0900ad6bdf176304f`).
+- **`player_id`**: Your GeoGuessr user ID. Find it by going to your profile page — it's the hex string in the URL (e.g. `geoguessr.com/user/abc123def456...`).
 - **`google_maps_api_key`** (recommended): Get one from the [Google Cloud Console](https://console.cloud.google.com/apis/credentials) with the Geocoding API enabled. Free tier allows 40,000 requests/month.
 - **`opencage_api_key`** (optional fallback): Get one from [OpenCage](https://opencagedata.com/). Free tier allows 2,500 requests/day.
 
