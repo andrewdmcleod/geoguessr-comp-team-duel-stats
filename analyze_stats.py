@@ -620,6 +620,17 @@ def generate_trend_data(df: pd.DataFrame) -> dict:
         team_games.append(entry)
 
     trend['team'] = {'games': team_games}
+
+    # Recent vs all-time comparison
+    rva = recent_vs_alltime(df)
+    if rva is not None:
+        trend['recent_vs_alltime'] = rva.to_dict(orient='records')
+
+    # Competitive advantage
+    comp_adv = competitive_advantage(df)
+    if comp_adv is not None:
+        trend['competitive_advantage'] = comp_adv.to_dict(orient='records')
+
     return trend
 
 

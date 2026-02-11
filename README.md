@@ -9,7 +9,8 @@ Fetch and analyze your competitive team duel games from GeoGuessr. Exports detai
 - **Country detection** for correct locations using `panorama.countryCode` (no geocoding needed)
 - **Local caching** of raw API responses in `raw_data/` so re-runs never re-fetch game data
 - **Incremental mode** with `--csv` flag to only fetch new games and append to an existing CSV
-- **30 CSV columns** including win/loss, health, damage, scores, team/round winners, and more
+- **Multi-team detection** — automatically discovers all teams you've played on, with interactive menu or saved config
+- **31 CSV columns** including team_key, win/loss, health, damage, scores, team/round winners, and more
 - **Comprehensive analysis** with per-player, per-country, per-region breakdowns
 - **Trend export** to JSON for feeding into LLMs for deeper trend analysis
 
@@ -37,8 +38,8 @@ cp cookie.txt.example cookie.txt
 # 3. Verify your API keys work
 python test_geocoding.py
 
-# 4. Fetch your games
-python geoguessr_stats.py --csv team_duels.csv --my-team-only
+# 4. Fetch your games (interactive team menu on first run)
+python geoguessr_stats.py --csv team_duels.csv
 
 # 5. Analyze your stats
 python analyze_stats.py team_duels.csv
@@ -117,14 +118,14 @@ This tests all configured providers against a known location (Eiffel Tower) and 
 Remember to activate the virtual environment first: `source .venv/bin/activate`
 
 ```bash
-# Fetch all team duel games (with geocoding)
-python geoguessr_stats.py
+# Fetch all team duel games (interactive team menu on first run)
+python geoguessr_stats.py --csv team_duels.csv
 
-# Fetch only your team's guesses (recommended — saves geocoding API calls)
-python geoguessr_stats.py --my-team-only
+# Skip the interactive team menu (use saved teams_config.json)
+python geoguessr_stats.py --csv team_duels.csv --no-teams-menu
 
-# Use a persistent CSV file (incremental — only fetches new games)
-python geoguessr_stats.py --csv team_duels.csv --my-team-only
+# Use a specific teams config file
+python geoguessr_stats.py --csv team_duels.csv --teams-config my_teams.json
 
 # Limit to N games (useful for testing)
 python geoguessr_stats.py --limit 5
@@ -139,6 +140,8 @@ python geoguessr_stats.py --geo-provider opencage
 # Custom geocoding delay (seconds between requests)
 python geoguessr_stats.py --geocode-delay 2.0
 ```
+
+> **Multi-team support:** On first run, the script discovers all teams you've played on and shows an interactive menu (via `questionary`) where you can select which teams to process and configure per-team settings (my-team-only, reverse geocoding). Your choices are saved to `teams_config.json` so subsequent runs skip the menu. If only one team is found, it's auto-selected.
 
 ### Analyzing stats
 
@@ -177,25 +180,28 @@ The analysis script outputs:
 |---------|-------------|
 | **Player Summary** | Games, rounds, avg distance/time, country accuracy per player |
 | **Accuracy Ranking** | Players ranked by average distance |
-| **Speed Ranking** | Players ranked by average time (timed rounds only) |
-| **Speed vs Accuracy** | Scatter of avg time vs avg distance per player |
+| **Speed Ranking** | Players ranked by average time (excludes timeouts and no-pin guesses) |
+| **Speed vs Accuracy** | Efficiency score combining time and distance per player |
+| **Recent vs All-Time** | Last 10 games vs all-time stats with trend arrows (↑↓) per player |
 | **Team Stats Summary** | Avg/worst distance and avg time, split by win vs loss |
 | **Player Win/Loss Split** | Avg distance in wins vs losses per player |
-| **Won Team** | % of rounds each player had the best guess on their team |
-| **Won Round** | % of rounds each player had the best guess overall |
+| **Won Team** | % of rounds each player beat their teammate (+ by move mode) |
+| **Won Round** | % of rounds each player had the best guess overall (+ by move mode) |
 | **Region Performance** | Average distance per player per continent |
-| **Best/Worst Countries** | Per player, countries with best/worst average distance (min 2 guesses) |
-| **Countries I Confuse** | "When it was X, I guessed Y" patterns |
-| **Countries Worth Studying** | Worst-performing large countries (geographically significant) |
 | **Move vs No-Move** | Distance, time, and accuracy comparison across game modes |
+| **Countries I Confuse** | "When it was X, I guessed Y" — top 10 per player |
+| **Best/Worst Countries** | Per player, countries with best/worst average distance (min 2 guesses) |
+| **Countries Worth Studying** | Importance-weighted: avg distance × log(frequency) for large countries |
+| **Competitive Advantage** | Countries where you outperform opponents (and vice versa) |
 | **Rounds Played Trend** | Avg rounds per game, avg rounds in wins vs losses |
 
 ## CSV Columns
 
-The exported CSV contains 30 columns:
+The exported CSV contains 31 columns:
 
 | Column | Description |
 |--------|-------------|
+| `team_key` | Stable team identifier (sorted player IDs joined with `_`) |
 | `game_id` | Unique game identifier |
 | `game_date` | ISO timestamp of the game |
 | `round` | Round number within the game |
@@ -228,7 +234,8 @@ The exported CSV contains 30 columns:
 - **Your team is detected automatically.** The script logs in with your cookie, fetches your profile, and uses your user ID to identify which team you're on in each game. Your teammates are discovered from the game data — you don't need to configure them.
 - **Correct country** comes from `panorama.countryCode` in the game data (no API call needed).
 - **Guessed country** requires reverse geocoding your guess coordinates via Google Maps (or another provider). This is the only part that uses geocoding API calls. Use `--no-geocode` to skip this.
-- **`--my-team-only`** skips geocoding opponent guesses (saving API calls) but still reads their distances to compute `won_round`.
+- **`--my-team-only`** (deprecated) skips geocoding opponent guesses. Now configured per-team in the interactive menu / `teams_config.json`.
+- **Multi-team processing**: Each team gets its own CSV and geocoder instance. Teams are identified by a stable key (sorted player IDs).
 
 ## Caching
 
