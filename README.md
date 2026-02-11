@@ -13,9 +13,40 @@ Fetch and analyze your competitive team duel games from GeoGuessr. Exports detai
 - **Comprehensive analysis** with per-player, per-country, per-region breakdowns
 - **Trend export** to JSON for feeding into LLMs for deeper trend analysis
 
+## Prerequisites
+
+- **Python 3.8+**
+- **GeoGuessr Pro account** (team duels is a Pro feature; the API requires an active session)
+- **Google Maps API key** (recommended for reverse geocoding guess locations)
+
+## Quick Start
+
+```bash
+# 1. Clone and set up
+git clone https://github.com/andrewdmcleod/geoguessr-comp-team-duel-stats.git
+cd geoguessr-comp-team-duel-stats
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Configure (see Setup section below)
+cp config.json.example config.json
+cp cookie.txt.example cookie.txt
+# Edit config.json and cookie.txt with your details
+
+# 3. Verify your API keys work
+python test_geocoding.py
+
+# 4. Fetch your games
+python geoguessr_stats.py --csv team_duels.csv --my-team-only
+
+# 5. Analyze your stats
+python analyze_stats.py team_duels.csv
+```
+
 ## Setup
 
-### 1. Clone and install dependencies
+### 1. Install dependencies
 
 ```bash
 git clone https://github.com/andrewdmcleod/geoguessr-comp-team-duel-stats.git
@@ -45,8 +76,8 @@ cp cookie.txt.example cookie.txt
 }
 ```
 
-- **`player_id`**: Your GeoGuessr user ID. Find it by going to your profile page — it's the hex string in the URL (e.g. `geoguessr.com/user/abc123def456...`).
-- **`google_maps_api_key`** (recommended): Get one from the [Google Cloud Console](https://console.cloud.google.com/apis/credentials) with the Geocoding API enabled. Free tier allows 40,000 requests/month.
+- **`player_id`**: Your GeoGuessr user ID. Go to your profile on [geoguessr.com](https://www.geoguessr.com), click on your avatar/name, and look at the URL — it will be something like `geoguessr.com/user/abc123def456...`. Copy that hex string. This is used as a fallback if the API can't determine your identity from the cookie; in most cases the cookie is sufficient.
+- **`google_maps_api_key`** (recommended): Required for reverse geocoding your guess locations. See [Google Maps API setup](#google-maps-api-setup) below.
 - **`opencage_api_key`** (optional fallback): Get one from [OpenCage](https://opencagedata.com/). Free tier allows 2,500 requests/day.
 
 **`cookie.txt`** — your GeoGuessr session cookie:
@@ -58,18 +89,38 @@ cp cookie.txt.example cookie.txt
 
 > **Note:** The cookie expires periodically. If you get authentication errors, grab a fresh cookie.
 
+### 3. Verify your setup
+
+Run the geocoding test to confirm your API keys are working:
+
+```bash
+python test_geocoding.py
+```
+
+This tests all configured providers against a known location (Eiffel Tower) and reports which ones are active.
+
+### Google Maps API setup
+
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project (or select an existing one)
+3. Go to **APIs & Services** → **Library**
+4. Search for **"Geocoding API"** and click **Enable**
+5. Go to **APIs & Services** → **Credentials** → **Create Credentials** → **API Key**
+6. Copy the key into `config.json` as `google_maps_api_key`
+
+> Google gives you $200/month of free credit, which covers ~40,000 geocoding requests. You won't be charged unless you exceed this.
+
 ## Usage
 
 ### Fetching stats
 
-```bash
-# Activate the virtual environment first
-source .venv/bin/activate
+Remember to activate the virtual environment first: `source .venv/bin/activate`
 
+```bash
 # Fetch all team duel games (with geocoding)
 python geoguessr_stats.py
 
-# Fetch only your team's guesses
+# Fetch only your team's guesses (recommended — saves geocoding API calls)
 python geoguessr_stats.py --my-team-only
 
 # Use a persistent CSV file (incremental — only fetches new games)
@@ -78,7 +129,8 @@ python geoguessr_stats.py --csv team_duels.csv --my-team-only
 # Limit to N games (useful for testing)
 python geoguessr_stats.py --limit 5
 
-# Skip geocoding (faster, but no guessed_country column)
+# Skip geocoding (faster — correct_country still works via panorama data,
+# but guessed_country will be empty)
 python geoguessr_stats.py --no-geocode
 
 # Choose geocoding provider (default: google)
@@ -102,6 +154,19 @@ python analyze_stats.py team_duels.csv --export analysis_output/
 
 # Export chronological trend data as JSON (for LLM analysis)
 python analyze_stats.py team_duels.csv --trend-export trends.json
+```
+
+### Typical workflow
+
+```bash
+# First run — fetches all games
+python geoguessr_stats.py --csv team_duels.csv --my-team-only
+
+# After playing more games — only fetches new ones
+python geoguessr_stats.py --csv team_duels.csv --my-team-only
+
+# Analyze whenever you want
+python analyze_stats.py team_duels.csv
 ```
 
 ### Analysis sections
@@ -147,7 +212,7 @@ The exported CSV contains 30 columns:
 | `guess_lat` / `guess_lng` | Player's guess coordinates |
 | `correct_country_code` | ISO 3166-1 alpha-2 code of correct country |
 | `correct_country` | Full name of the correct country |
-| `guessed_country` | Full name of the guessed country (geocoded) |
+| `guessed_country` | Full name of the guessed country (requires geocoding) |
 | `correct_country_flag` | Whether the player guessed the correct country |
 | `region` | Continent/region of the correct location |
 | `is_team_best_guess` | Whether this was the team's best guess for the round |
@@ -158,6 +223,13 @@ The exported CSV contains 30 columns:
 | `damage_dealt` | Damage dealt by the team this round |
 | `multiplier` | Round damage multiplier |
 
+## How it works
+
+- **Your team is detected automatically.** The script logs in with your cookie, fetches your profile, and uses your user ID to identify which team you're on in each game. Your teammates are discovered from the game data — you don't need to configure them.
+- **Correct country** comes from `panorama.countryCode` in the game data (no API call needed).
+- **Guessed country** requires reverse geocoding your guess coordinates via Google Maps (or another provider). This is the only part that uses geocoding API calls. Use `--no-geocode` to skip this.
+- **`--my-team-only`** skips geocoding opponent guesses (saving API calls) but still reads their distances to compute `won_round`.
+
 ## Caching
 
 Game details are cached locally in `raw_data/games/` as JSON files. This means:
@@ -166,21 +238,22 @@ Game details are cached locally in `raw_data/games/` as JSON files. This means:
 - If you change processing logic, you can re-process from cached data without API calls
 - The activity feed is always re-fetched (it's small and changes as you play new games)
 
+## Geocoding Providers
+
+| Provider | Default Delay | Free Tier | Notes |
+|----------|--------------|-----------|-------|
+| Google Maps | 0.05s | ~40,000/month ($200 credit) | Recommended. Most accurate. |
+| OpenCage | 1.0s | 2,500/day | Good fallback option. |
+| Nominatim | 1.5s | 1 req/sec | Free but strict rate limits. May block your IP. |
+
+The script uses Google as the primary provider and automatically falls back to OpenCage, then Nominatim if the primary fails.
+
 ## Known Limitations
 
 - The GeoGuessr API only provides each player's **final guess position**. There is no way to distinguish between clicking "Guess" vs timer expiry, or first pin drop vs final pin position.
 - Geocoding accuracy depends on the provider. Ocean/water guesses may show as "Lost at Sea".
 - The session cookie expires periodically and needs to be refreshed manually.
-
-## API Keys
-
-| Provider | Default Delay | Free Tier | Notes |
-|----------|--------------|-----------|-------|
-| Google Maps | 0.05s | 40,000/month | Recommended. Most accurate. |
-| OpenCage | 1.0s | 2,500/day | Good fallback option. |
-| Nominatim | 1.5s | 1 req/sec | Free but strict rate limits. May block your IP. |
-
-The script uses Google as the primary provider and automatically falls back to OpenCage, then Nominatim if the primary fails.
+- Only **team duel** games are fetched. Other game modes (battle royale, classic, etc.) are not supported.
 
 ## License
 
