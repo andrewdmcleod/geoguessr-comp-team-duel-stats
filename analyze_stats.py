@@ -371,6 +371,167 @@ def rounds_played_trend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     return pd.DataFrame([stats])
 
 
+def recent_vs_alltime(df: pd.DataFrame, recent_n: int = 10) -> Optional[pd.DataFrame]:
+    """Compare recent performance (last N games) vs all-time per player.
+
+    Shows avg distance, country accuracy %, win rate %, and avg time for
+    both 'all-time' and 'recent' windows, plus a delta column with arrows.
+    """
+    if 'game_date_parsed' not in df.columns or df['game_date_parsed'].isna().all():
+        return None
+
+    # Get chronologically ordered unique games
+    game_dates = df.groupby('game_id')['game_date_parsed'].min().sort_values()
+    if len(game_dates) < 2:
+        return None
+
+    recent_game_ids = set(game_dates.tail(recent_n).index)
+
+    rows = []
+    for player_name in sorted(df['player_name'].unique()):
+        pdf = df[df['player_name'] == player_name]
+        pdf_recent = pdf[pdf['game_id'].isin(recent_game_ids)]
+
+        if len(pdf_recent) == 0:
+            continue
+
+        def calc_stats(subset):
+            stats = {
+                'games': subset['game_id'].nunique(),
+                'avg_dist_km': round(float(subset['distance_km'].mean()), 1),
+                'avg_time_sec': round(float(subset['time_seconds'].mean()), 1),
+            }
+            if 'correct_country_flag' in subset.columns and subset['correct_country_flag'].notna().any():
+                stats['country_acc_%'] = round(float(subset['correct_country_flag'].mean() * 100), 1)
+            else:
+                stats['country_acc_%'] = None
+            if 'game_won_bool' in subset.columns and subset['game_won_bool'].notna().any():
+                game_outcomes = subset.groupby('game_id')['game_won_bool'].first()
+                stats['win_rate_%'] = round(float(game_outcomes.mean() * 100), 1)
+            else:
+                stats['win_rate_%'] = None
+            return stats
+
+        all_stats = calc_stats(pdf)
+        rec_stats = calc_stats(pdf_recent)
+
+        def delta_str(recent_val, all_val, lower_is_better=True):
+            if recent_val is None or all_val is None:
+                return ''
+            diff = recent_val - all_val
+            if abs(diff) < 0.05:
+                return '  ='
+            arrow = '\u2193' if diff < 0 else '\u2191'
+            # For distance/time, lower is better, so down arrow is good
+            # For accuracy/win rate, higher is better, so up arrow is good
+            if lower_is_better:
+                color = '+' if diff < 0 else '-'
+            else:
+                color = '+' if diff > 0 else '-'
+            return f'{color}{arrow}{abs(diff):.1f}'
+
+        rows.append({
+            'player': player_name,
+            'period': 'all-time',
+            'games': all_stats['games'],
+            'avg_dist_km': all_stats['avg_dist_km'],
+            'avg_time_sec': all_stats['avg_time_sec'],
+            'country_acc_%': all_stats['country_acc_%'],
+            'win_rate_%': all_stats['win_rate_%'],
+        })
+        rows.append({
+            'player': player_name,
+            'period': f'last {rec_stats["games"]}',
+            'games': rec_stats['games'],
+            'avg_dist_km': rec_stats['avg_dist_km'],
+            'avg_time_sec': rec_stats['avg_time_sec'],
+            'country_acc_%': rec_stats['country_acc_%'],
+            'win_rate_%': rec_stats['win_rate_%'],
+        })
+        rows.append({
+            'player': player_name,
+            'period': 'delta',
+            'games': '',
+            'avg_dist_km': delta_str(rec_stats['avg_dist_km'], all_stats['avg_dist_km'], lower_is_better=True),
+            'avg_time_sec': delta_str(rec_stats['avg_time_sec'], all_stats['avg_time_sec'], lower_is_better=True),
+            'country_acc_%': delta_str(rec_stats['country_acc_%'], all_stats['country_acc_%'], lower_is_better=False),
+            'win_rate_%': delta_str(rec_stats['win_rate_%'], all_stats['win_rate_%'], lower_is_better=False),
+        })
+
+    if not rows:
+        return None
+
+    result = pd.DataFrame(rows)
+    return result
+
+
+def competitive_advantage(df: pd.DataFrame, min_guesses: int = 3) -> Optional[pd.DataFrame]:
+    """Identify opponent country weaknesses vs your team's strengths.
+
+    Compares per-country average distance between your team and opponents.
+    Positive 'advantage_km' means you outperform opponents on that country.
+    Requires opponent data in the CSV (i.e. fetched without --my-team-only).
+    """
+    if 'correct_country' not in df.columns or 'is_team_best_guess' not in df.columns:
+        return None
+
+    # Determine which players are on the user's team vs opponents
+    # We use team_key or is_team_best_guess to distinguish.
+    # If team_key is present, identify the team. Otherwise, use a heuristic:
+    # players appearing in is_team_best_guess True/False analysis.
+    # The simplest approach: look at all unique player_ids and group by team_key if available.
+
+    if 'team_key' in df.columns:
+        # Use the most common team_key as "my team"
+        team_keys = df['team_key'].value_counts()
+        if len(team_keys) == 0:
+            return None
+        my_team_key = team_keys.index[0]
+        my_team_players = set(df[df['team_key'] == my_team_key]['player_id'].unique())
+    else:
+        # Fallback: if won_team is present, players with won_team data are on my team
+        if 'won_team' not in df.columns:
+            return None
+        my_team_players = set(df[df['won_team'].notna()]['player_id'].unique())
+
+    if not my_team_players:
+        return None
+
+    df_valid = df[df['correct_country'].notna() & ~df['correct_country'].isin(['Unknown', 'Lost at Sea'])]
+    if len(df_valid) == 0:
+        return None
+
+    df_my_team = df_valid[df_valid['player_id'].isin(my_team_players)]
+    df_opponents = df_valid[~df_valid['player_id'].isin(my_team_players)]
+
+    if len(df_opponents) == 0:
+        return None
+
+    # Per-country stats for my team
+    my_stats = df_my_team.groupby('correct_country').agg(
+        my_avg_dist=('distance_km', 'mean'),
+        my_guesses=('distance_km', 'count')
+    ).round(1)
+
+    # Per-country stats for opponents
+    opp_stats = df_opponents.groupby('correct_country').agg(
+        opp_avg_dist=('distance_km', 'mean'),
+        opp_guesses=('distance_km', 'count')
+    ).round(1)
+
+    # Join and filter
+    combined = my_stats.join(opp_stats, how='inner')
+    combined = combined[(combined['my_guesses'] >= min_guesses) & (combined['opp_guesses'] >= min_guesses)]
+
+    if len(combined) == 0:
+        return None
+
+    combined['advantage_km'] = (combined['opp_avg_dist'] - combined['my_avg_dist']).round(1)
+    combined = combined.sort_values('advantage_km', ascending=False).reset_index()
+
+    return combined
+
+
 def country_performance(df: pd.DataFrame, player_id: str = None) -> pd.DataFrame:
     """Per-country performance breakdown"""
     if player_id:
@@ -512,6 +673,16 @@ def main():
     if not efficiency.empty:
         print(efficiency.to_string(index=False))
 
+    # ---- Recent vs All-Time ----
+    rva = recent_vs_alltime(df)
+    if rva is not None:
+        print_section("\U0001f4c5 RECENT VS ALL-TIME",
+                      "last 10 games vs all-time. +\u2191=improving, -\u2193=declining")
+        for player in rva['player'].unique():
+            pdata = rva[rva['player'] == player]
+            print(f"\n  {player}:")
+            print(pdata.drop(columns=['player']).to_string(index=False))
+
     # ---- Team Stats Summary ----
     team_stats = team_stats_summary(df)
     if team_stats is not None:
@@ -590,6 +761,18 @@ def main():
                       "Worst performance + geographically large = worth learning regional clues")
         print(worth.to_string(index=False))
 
+    # ---- Competitive Advantage ----
+    comp_adv = competitive_advantage(df)
+    if comp_adv is not None:
+        print_section("\u2694\ufe0f  COMPETITIVE ADVANTAGE",
+                      "countries where you outperform opponents (positive = your advantage)")
+        n_show = min(10, len(comp_adv))
+        print(f"\n  Top {n_show} advantages (you're better):")
+        print(comp_adv.head(n_show).to_string(index=False))
+        n_bottom = min(10, len(comp_adv))
+        print(f"\n  Top {n_bottom} disadvantages (opponents are better):")
+        print(comp_adv.tail(n_bottom).to_string(index=False))
+
     # ---- Rounds Played Trend ----
     rpt = rounds_played_trend(df)
     if rpt is not None:
@@ -642,6 +825,10 @@ def main():
             best.to_csv(export_dir / 'best_countries.csv', index=False)
         if not worth.empty:
             worth.to_csv(export_dir / 'countries_worth_studying.csv', index=False)
+        if rva is not None:
+            rva.to_csv(export_dir / 'recent_vs_alltime.csv', index=False)
+        if comp_adv is not None:
+            comp_adv.to_csv(export_dir / 'competitive_advantage.csv', index=False)
 
         print(f"\n\U0001f4be Analysis exported to {export_dir}/")
 
