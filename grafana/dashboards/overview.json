@@ -388,6 +388,130 @@
         ]
       },
       "options": { "showHeader": true, "sortBy": [{ "displayName": "player_name", "desc": false }] }
+    },
+    {
+      "id": 19,
+      "title": "Initiative Rate by Player",
+      "description": "How often each player clicks first (initiative rate %) and participation rate %",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 76 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "WITH player_stats AS (SELECT player_name, COUNT(*) FILTER (WHERE clicked_first = true AND status = 'guessed') AS clicked_first_count, COUNT(*) FILTER (WHERE status = 'guessed') AS guessed_count, COUNT(*) AS total_count FROM geoguessr.guesses WHERE status IS NOT NULL AND status != '' GROUP BY player_name) SELECT player_name, ROUND(clicked_first_count::numeric / NULLIF(guessed_count, 0) * 100, 1) AS initiative_rate_pct, ROUND(guessed_count::numeric / NULLIF(total_count, 0) * 100, 1) AS participation_rate_pct FROM player_stats ORDER BY initiative_rate_pct DESC",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "color": { "mode": "palette-classic" } }
+      },
+      "options": { "orientation": "vertical", "xField": "player_name", "stacking": "none" }
+    },
+    {
+      "id": 20,
+      "title": "Initiative Rate Over Time",
+      "description": "5-game rolling initiative rate (% of rounds where player clicked first)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 76 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "WITH per_game AS (SELECT g.played_at, gu.player_name, AVG(CASE WHEN gu.clicked_first AND gu.status = 'guessed' THEN 1.0 ELSE 0.0 END) AS init_rate FROM geoguessr.games g JOIN geoguessr.guesses gu ON g.game_id = gu.game_id WHERE gu.status IS NOT NULL AND gu.status != '' GROUP BY g.game_id, g.played_at, gu.player_name) SELECT played_at AS time, player_name, AVG(init_rate) OVER (PARTITION BY player_name ORDER BY played_at ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) * 100 AS initiative_rate_pct FROM per_game ORDER BY played_at",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 5 }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 21,
+      "title": "Guess Speed by Region",
+      "description": "Average time remaining (sec) when guess submitted, per player per region. Higher = clicked faster.",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 84 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT gu.player_name, r.region, ROUND(AVG(gu.time_remaining_sec)::numeric, 1) AS avg_time_remaining_sec, COUNT(*) AS guesses FROM geoguessr.guesses gu JOIN geoguessr.rounds r ON gu.game_id = r.game_id AND gu.round_number = r.round_number WHERE gu.status = 'guessed' AND gu.time_remaining_sec IS NOT NULL AND r.region IS NOT NULL AND r.region != '' AND r.region != 'Unknown' AND r.region != 'Other' GROUP BY gu.player_name, r.region ORDER BY gu.player_name, avg_time_remaining_sec DESC",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "avg_time_remaining_sec" }, "properties": [{ "id": "unit", "value": "s" }] }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "avg_time_remaining_sec", "desc": true }] }
+    },
+    {
+      "id": 22,
+      "title": "No-Pin Analysis",
+      "description": "Rounds where player did not drop a pin: count, percentage, and round loss rate",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 84 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "WITH player_nopin AS (SELECT player_name, COUNT(*) FILTER (WHERE status = 'no_pin') AS no_pin_count, COUNT(*) AS total_rounds, COUNT(*) FILTER (WHERE status = 'no_pin' AND won_round = false) AS no_pin_losses FROM geoguessr.guesses WHERE status IS NOT NULL AND status != '' GROUP BY player_name) SELECT player_name, no_pin_count, total_rounds, ROUND(no_pin_count::numeric / NULLIF(total_rounds, 0) * 100, 1) AS no_pin_pct, ROUND(no_pin_losses::numeric / NULLIF(no_pin_count, 0) * 100, 1) AS loss_when_no_pin_pct FROM player_nopin ORDER BY no_pin_pct DESC",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": {} },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "no_pin_pct", "desc": true }] }
+    },
+    {
+      "id": 23,
+      "title": "Hesitation Index (Team Coordination)",
+      "description": "Average gap (sec) between first and last guess per round. Lower = more coordinated.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 92 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "WITH round_hesitation AS (SELECT gu.game_id, gu.round_number, MAX(gu.time_remaining_sec) - MIN(gu.time_remaining_sec) AS hesitation_sec FROM geoguessr.guesses gu WHERE gu.status = 'guessed' AND gu.time_remaining_sec IS NOT NULL GROUP BY gu.game_id, gu.round_number HAVING COUNT(*) > 1) SELECT g.played_at AS time, AVG(rh.hesitation_sec) OVER (ORDER BY g.played_at ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS rolling_hesitation_sec FROM round_hesitation rh JOIN geoguessr.games g ON rh.game_id = g.game_id ORDER BY g.played_at",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "fixed", "fixedColor": "orange" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 24,
+      "title": "Pressure Response",
+      "description": "Average distance after winning vs losing the previous round. Shows clutch performance under pressure.",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 92 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "WITH ordered_rounds AS (SELECT gu.player_name, gu.game_id, gu.round_number, gu.distance_km, gu.won_round, LAG(gu.won_round) OVER (PARTITION BY gu.player_name, gu.game_id ORDER BY gu.round_number) AS prev_won_round FROM geoguessr.guesses gu WHERE gu.status = 'guessed') SELECT player_name, CASE WHEN prev_won_round THEN 'After Win' ELSE 'After Loss' END AS prev_outcome, ROUND(AVG(distance_km)::numeric, 1) AS avg_dist_km, COUNT(*) AS rounds FROM ordered_rounds WHERE prev_won_round IS NOT NULL GROUP BY player_name, prev_won_round ORDER BY player_name, prev_outcome",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "km", "color": { "mode": "palette-classic" } }
+      },
+      "options": { "orientation": "vertical", "xField": "player_name", "stacking": "none" }
     }
   ],
   "schemaVersion": 39,
@@ -398,5 +522,5 @@
   "timezone": "browser",
   "title": "GeoGuessr Team Duel Stats",
   "uid": "geoguessr-overview",
-  "version": 2
+  "version": 3
 }

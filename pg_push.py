@@ -46,6 +46,10 @@ def get_ddl(schema: str) -> list:
             pano_country_code    TEXT,
             pano_country_name    TEXT,
             region               TEXT,
+            round_start_time     TIMESTAMPTZ,
+            round_end_time       TIMESTAMPTZ,
+            timer_start_time     TIMESTAMPTZ,
+            round_duration_sec   DOUBLE PRECISION,
             PRIMARY KEY (game_id, round_number),
             FOREIGN KEY (game_id) REFERENCES {schema}.games(game_id) ON DELETE CASCADE
         )""",
@@ -71,6 +75,10 @@ def get_ddl(schema: str) -> list:
             health_after         DOUBLE PRECISION,
             damage_dealt         DOUBLE PRECISION,
             multiplier           DOUBLE PRECISION,
+            guess_created        TIMESTAMPTZ,
+            time_remaining_sec   DOUBLE PRECISION,
+            clicked_first        BOOLEAN,
+            status               TEXT,
             PRIMARY KEY (game_id, round_number, player_id),
             FOREIGN KEY (game_id, round_number) REFERENCES {schema}.rounds(game_id, round_number) ON DELETE CASCADE
         )""",
@@ -85,6 +93,7 @@ def get_indexes(schema: str) -> list:
         f"CREATE INDEX IF NOT EXISTS idx_rounds_country ON {schema}.rounds(pano_country_code)",
         f"CREATE INDEX IF NOT EXISTS idx_guesses_player ON {schema}.guesses(player_id)",
         f"CREATE INDEX IF NOT EXISTS idx_guesses_team ON {schema}.guesses(team_key)",
+        f"CREATE INDEX IF NOT EXISTS idx_guesses_status ON {schema}.guesses(status)",
     ]
 
 
@@ -160,6 +169,10 @@ def rows_to_tables(rows: List[Dict]) -> tuple:
                 row.get('correct_country_code', ''),
                 row.get('correct_country', ''),
                 row.get('region', ''),
+                _parse_ts(row.get('round_start_time')),
+                _parse_ts(row.get('round_end_time')),
+                _parse_ts(row.get('timer_start_time')),
+                _parse_float(row.get('round_duration_sec')),
             )
 
         # Guesses table (one row per game+round+player)
@@ -184,6 +197,10 @@ def rows_to_tables(rows: List[Dict]) -> tuple:
             _parse_float(row.get('health_after')),
             _parse_float(row.get('damage_dealt')),
             _parse_float(row.get('multiplier')),
+            _parse_ts(row.get('guess_created')),
+            _parse_float(row.get('time_remaining_sec')),
+            _parse_bool(row.get('clicked_first')),
+            row.get('status', ''),
         ))
 
     return (
@@ -272,8 +289,9 @@ def push_to_postgres(
         print(f"  Inserting rounds...")
         rounds_sql = f"""
             INSERT INTO {schema}.rounds
-            (game_id, round_number, pano_lat, pano_lng, pano_country_code, pano_country_name, region)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (game_id, round_number, pano_lat, pano_lng, pano_country_code, pano_country_name, region,
+             round_start_time, round_end_time, timer_start_time, round_duration_sec)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (game_id, round_number) DO NOTHING
         """
         for i in range(0, len(rounds), batch_size):
@@ -288,8 +306,9 @@ def push_to_postgres(
              guess_lat, guess_lng, guessed_country,
              distance_m, distance_km, score, time_seconds,
              is_team_best_guess, won_team, won_round, correct_country_flag,
-             health_before, health_after, damage_dealt, multiplier)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             health_before, health_after, damage_dealt, multiplier,
+             guess_created, time_remaining_sec, clicked_first, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (game_id, round_number, player_id) DO NOTHING
         """
         for i in range(0, len(guesses), batch_size):

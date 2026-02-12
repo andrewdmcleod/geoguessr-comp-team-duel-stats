@@ -133,6 +133,10 @@ class TestRowsToTables:
         assert r[4] == 'FR'           # pano_country_code
         assert r[5] == 'France'       # pano_country_name
         assert r[6] == 'Europe'       # region
+        assert r[7] == '2025-01-15T10:30:00Z'  # round_start_time
+        assert r[8] == '2025-01-15T10:31:00Z'  # round_end_time
+        assert r[9] == '2025-01-15T10:30:00Z'  # timer_start_time
+        assert r[10] == 60.0          # round_duration_sec
 
     def test_guess_fields(self, sample_rows):
         _, _, guesses = rows_to_tables(sample_rows)
@@ -152,6 +156,22 @@ class TestRowsToTables:
         assert alice_g1r1[13] is True            # won_team
         assert alice_g1r1[14] is True            # won_round
         assert alice_g1r1[15] is True            # correct_country_flag
+        # New v0.3.0 columns
+        assert alice_g1r1[20] == '2025-01-15T10:30:22Z'  # guess_created
+        assert alice_g1r1[21] == 37.5            # time_remaining_sec
+        assert alice_g1r1[22] is True            # clicked_first
+        assert alice_g1r1[23] == 'guessed'       # status
+
+    def test_guess_no_pin_fields(self, sample_rows):
+        """Test that no-pin rows have correct status and empty timing."""
+        _, _, guesses = rows_to_tables(sample_rows)
+        # Bob's no-pin guess in game001 round 2
+        bob_g1r2 = [g for g in guesses
+                    if g[0] == 'game001' and g[1] == 2 and g[2] == 'player_b'][0]
+        assert bob_g1r2[23] == 'no_pin'         # status
+        assert bob_g1r2[20] is None              # guess_created (empty)
+        assert bob_g1r2[21] is None              # time_remaining_sec (empty)
+        assert bob_g1r2[22] is False             # clicked_first
 
     def test_empty_rows(self):
         games, rounds, guesses = rows_to_tables([])
@@ -199,7 +219,7 @@ class TestDDL:
     def test_indexes_returns_list(self):
         indexes = get_indexes('geoguessr')
         assert isinstance(indexes, list)
-        assert len(indexes) == 5
+        assert len(indexes) == 6
 
     def test_indexes_reference_schema(self):
         indexes = get_indexes('custom_schema')
