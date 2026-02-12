@@ -212,8 +212,8 @@ def player_win_loss_split(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     return out.reset_index()
 
 
-def won_team_stats(df: pd.DataFrame, by_move_mode: bool = False) -> Optional[pd.DataFrame]:
-    """How often each player beat their teammate.
+def won_team_stats(df: pd.DataFrame, by_move_mode: bool = False, team_name: str = 'Team') -> Optional[pd.DataFrame]:
+    """How often each player beat their teammate, with team aggregate row first.
 
     If by_move_mode=True, returns a separate breakdown per move mode.
     """
@@ -225,12 +225,30 @@ def won_team_stats(df: pd.DataFrame, by_move_mode: bool = False) -> Optional[pd.
     if by_move_mode and 'move_mode' in valid.columns:
         group_cols.append('move_mode')
 
+    # Team aggregate row
+    if not by_move_mode:
+        team_won = int(valid['won_team'].sum())
+        team_total = len(valid)
+        team_row = pd.DataFrame([{
+            'player_name': team_name,
+            'rounds_won': team_won,
+            'total_rounds': team_total,
+            'win_pct': round(team_won / max(team_total, 1) * 100, 1),
+        }])
+    else:
+        team_row = pd.DataFrame()
+
+    # Per-player rows
     result = valid.groupby(group_cols).agg(
         rounds_won=('won_team', 'sum'),
         total_rounds=('won_team', 'count')
     )
     result['win_pct'] = (result['rounds_won'] / result['total_rounds'] * 100).round(1)
-    return result.reset_index().sort_values(group_cols + ['win_pct'], ascending=[True] * len(group_cols) + [False])
+    player_rows = result.reset_index().sort_values(group_cols + ['win_pct'], ascending=[True] * len(group_cols) + [False])
+
+    if not team_row.empty:
+        return pd.concat([team_row, player_rows], ignore_index=True)
+    return player_rows
 
 
 def won_round_stats(df: pd.DataFrame, by_move_mode: bool = False) -> Optional[pd.DataFrame]:
@@ -254,8 +272,8 @@ def won_round_stats(df: pd.DataFrame, by_move_mode: bool = False) -> Optional[pd
     return result.reset_index().sort_values(group_cols + ['win_pct'], ascending=[True] * len(group_cols) + [False])
 
 
-def region_performance(df: pd.DataFrame) -> pd.DataFrame:
-    """Per-region performance by player"""
+def region_performance(df: pd.DataFrame, team_name: str = 'Team') -> pd.DataFrame:
+    """Per-region performance by player, with team aggregate row first."""
     if 'region' not in df.columns:
         return pd.DataFrame()
 
@@ -263,16 +281,24 @@ def region_performance(df: pd.DataFrame) -> pd.DataFrame:
     if len(df_valid) == 0:
         return pd.DataFrame()
 
+    # Team aggregate row
+    team_agg = df_valid.groupby('region')['distance_km'].mean().round(2)
+    team_row = team_agg.to_frame().T
+    team_row.index = [team_name]
+
+    # Per-player rows
     perf = df_valid.groupby(['player_name', 'region']).agg({
-        'distance_km': 'mean', 'game_id': 'count'
+        'distance_km': 'mean'
     }).round(2)
-    perf.columns = ['avg_distance_km', 'num_guesses']
+    perf.columns = ['avg_distance_km']
     perf = perf.reset_index()
-    return perf.pivot(index='player_name', columns='region', values='avg_distance_km')
+    player_pivot = perf.pivot(index='player_name', columns='region', values='avg_distance_km')
+
+    return pd.concat([team_row, player_pivot])
 
 
-def best_worst_countries(df: pd.DataFrame, n: int = 10) -> tuple:
-    """Best and worst countries per player"""
+def best_worst_countries(df: pd.DataFrame, n: int = 10, team_name: str = 'Team') -> tuple:
+    """Best and worst countries per player, with team aggregate rows first."""
     if 'correct_country' not in df.columns:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -280,21 +306,36 @@ def best_worst_countries(df: pd.DataFrame, n: int = 10) -> tuple:
     if len(df_valid) == 0:
         return pd.DataFrame(), pd.DataFrame()
 
+    # Team aggregate
+    team_perf = df_valid.groupby('correct_country').agg({
+        'distance_km': ['mean', 'count']
+    }).round(2)
+    team_perf.columns = ['avg_dist_km', 'num_guesses']
+    team_perf = team_perf[team_perf['num_guesses'] >= 3].reset_index()
+    team_perf.insert(0, 'player_name', team_name)
+
+    team_best = team_perf.sort_values('avg_dist_km').head(n)
+    team_worst = team_perf.sort_values('avg_dist_km', ascending=False).head(n)
+
+    # Per-player
     perf = df_valid.groupby(['player_name', 'correct_country']).agg({
         'distance_km': ['mean', 'count']
     }).round(2)
     perf.columns = ['avg_dist_km', 'num_guesses']
-    perf = perf[perf['num_guesses'] >= 2].reset_index()
+    perf = perf[perf['num_guesses'] >= 3].reset_index()
 
     best = perf.sort_values('avg_dist_km').groupby('player_name').head(n)
     best = best.sort_values(['player_name', 'avg_dist_km'])
     worst = perf.sort_values('avg_dist_km', ascending=False).groupby('player_name').head(n)
     worst = worst.sort_values(['player_name', 'avg_dist_km'], ascending=[True, False])
+
+    best = pd.concat([team_best, best], ignore_index=True)
+    worst = pd.concat([team_worst, worst], ignore_index=True)
     return best, worst
 
 
-def countries_i_confuse(df: pd.DataFrame) -> pd.DataFrame:
-    """Countries I keep thinking are other countries"""
+def countries_i_confuse(df: pd.DataFrame, team_name: str = 'Team') -> pd.DataFrame:
+    """Countries I keep thinking are other countries, with team aggregate rows first."""
     if 'correct_country' not in df.columns or 'guessed_country' not in df.columns:
         return pd.DataFrame()
 
@@ -308,11 +349,20 @@ def countries_i_confuse(df: pd.DataFrame) -> pd.DataFrame:
     if len(df_valid) == 0:
         return pd.DataFrame()
 
+    # Team aggregate
+    team_confusion = df_valid.groupby(
+        ['correct_country', 'guessed_country']
+    ).size().reset_index(name='times')
+    team_confusion.insert(0, 'player_name', team_name)
+    team_confusion = team_confusion.sort_values('times', ascending=False)
+
+    # Per-player
     confusion = df_valid.groupby(
         ['player_name', 'correct_country', 'guessed_country']
     ).size().reset_index(name='times')
     confusion = confusion.sort_values(['player_name', 'times'], ascending=[True, False])
-    return confusion
+
+    return pd.concat([team_confusion, confusion], ignore_index=True)
 
 
 def countries_worth_studying(df: pd.DataFrame, n: int = 15) -> pd.DataFrame:
@@ -328,7 +378,7 @@ def countries_worth_studying(df: pd.DataFrame, n: int = 15) -> pd.DataFrame:
         'distance_km': ['mean', 'count']
     }).round(2)
     perf.columns = ['avg_dist_km', 'num_guesses']
-    perf = perf[perf['num_guesses'] >= 2].reset_index()
+    perf = perf[perf['num_guesses'] >= 3].reset_index()
 
     perf['area_km2'] = perf['correct_country'].map(LARGE_COUNTRIES)
     perf = perf.dropna(subset=['area_km2'])
@@ -343,13 +393,25 @@ def countries_worth_studying(df: pd.DataFrame, n: int = 15) -> pd.DataFrame:
     return perf
 
 
-def move_vs_nomove(df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    """Compare performance across move modes"""
+def move_vs_nomove(df: pd.DataFrame, team_name: str = 'Team') -> Optional[pd.DataFrame]:
+    """Compare performance across move modes, with team aggregate row first."""
     if 'move_mode' not in df.columns or df['move_mode'].nunique() < 2:
         return None
 
     aggs = {'distance_km': 'mean', 'time_seconds': 'mean', 'game_id': 'count'}
 
+    # Team aggregate row
+    team_agg = df.groupby('move_mode').agg(aggs).round(2)
+    team_agg.columns = ['avg_dist_km', 'avg_time_sec', 'num_guesses']
+    if 'correct_country_flag' in df.columns:
+        team_pct = df[df['correct_country_flag'].notna()].groupby(
+            'move_mode'
+        )['correct_country_flag'].mean().round(3) * 100
+        team_agg = team_agg.join(team_pct.rename('correct_country_pct'))
+    team_agg.insert(0, 'player_name', team_name)
+    team_agg = team_agg.reset_index()
+
+    # Per-player rows
     comparison = df.groupby(['player_name', 'move_mode']).agg(aggs).round(2)
     comparison.columns = ['avg_dist_km', 'avg_time_sec', 'num_guesses']
 
@@ -359,7 +421,8 @@ def move_vs_nomove(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         )['correct_country_flag'].mean().round(3) * 100
         comparison = comparison.join(pct.rename('correct_country_pct'))
 
-    return comparison.reset_index()
+    player_rows = comparison.reset_index()
+    return pd.concat([team_agg, player_rows], ignore_index=True)
 
 
 def rounds_played_trend(df: pd.DataFrame) -> Optional[pd.DataFrame]:
@@ -566,6 +629,276 @@ def country_performance(df: pd.DataFrame, player_id: str = None) -> pd.DataFrame
     perf.columns = ['avg_distance_km', 'num_guesses']
     perf = perf[perf['num_guesses'] >= 3]
     return perf.sort_values('avg_distance_km').reset_index()
+
+
+# ===================================================================
+# Initiative & timing analysis (requires v0.3.0 columns)
+# ===================================================================
+
+def initiative_summary(df: pd.DataFrame, team_name: str = 'Team') -> Optional[pd.DataFrame]:
+    """Per-player initiative metrics: who clicks first, who doesn't guess.
+
+    initiative_rate = clicked_first / rounds_present (not total_rounds)
+    participation_rate = rounds_present / total_rounds
+    """
+    if 'status' not in df.columns or 'clicked_first' not in df.columns:
+        return None
+
+    # Ensure boolean types
+    df = df.copy()
+    df['clicked_first'] = df['clicked_first'].apply(
+        lambda x: True if str(x).strip() == 'True' else False)
+
+    total_rounds_per_game = df.groupby('game_id')['round'].nunique()
+    player_total_rounds = df.groupby('player_name')['game_id'].apply(
+        lambda games: sum(total_rounds_per_game.get(g, 0) for g in games.unique())
+    )
+
+    rows = []
+    # Team aggregate first
+    team_guessed = df[df['status'] == 'guessed']
+    team_no_pin = df[df['status'] == 'no_pin']
+    team_clicked_first = team_guessed[team_guessed['clicked_first'] == True]
+    team_rounds_present = len(team_guessed)
+    team_total = len(df)
+    rows.append({
+        'player_name': team_name,
+        'clicked_first': len(team_clicked_first),
+        'guessed_not_first': len(team_guessed) - len(team_clicked_first),
+        'no_pin': len(team_no_pin),
+        'rounds_present': team_rounds_present,
+        'total_rounds': team_total,
+        'initiative_rate': round(len(team_clicked_first) / max(team_rounds_present, 1) * 100, 1),
+        'participation_rate': round(team_rounds_present / max(team_total, 1) * 100, 1),
+    })
+
+    # Per player
+    for player_name, pdf in df.groupby('player_name'):
+        guessed = pdf[pdf['status'] == 'guessed']
+        no_pin = pdf[pdf['status'] == 'no_pin']
+        clicked = guessed[guessed['clicked_first'] == True]
+        rounds_present = len(guessed)
+        total = len(pdf)
+        rows.append({
+            'player_name': player_name,
+            'clicked_first': len(clicked),
+            'guessed_not_first': len(guessed) - len(clicked),
+            'no_pin': len(no_pin),
+            'rounds_present': rounds_present,
+            'total_rounds': total,
+            'initiative_rate': round(len(clicked) / max(rounds_present, 1) * 100, 1),
+            'participation_rate': round(rounds_present / max(total, 1) * 100, 1),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def guess_time_by_region(df: pd.DataFrame, team_name: str = 'Team') -> Optional[pd.DataFrame]:
+    """Average time_remaining_sec per player per region."""
+    if 'time_remaining_sec' not in df.columns or 'region' not in df.columns:
+        return None
+
+    df_valid = df[(df['status'] == 'guessed') &
+                  (df['region'].notna()) &
+                  (~df['region'].isin(['Unknown', 'Other']))].copy()
+    df_valid['time_remaining_sec'] = pd.to_numeric(df_valid['time_remaining_sec'], errors='coerce')
+    df_valid = df_valid.dropna(subset=['time_remaining_sec'])
+
+    if df_valid.empty:
+        return None
+
+    # Team aggregate
+    team_agg = df_valid.groupby('region')['time_remaining_sec'].mean().round(1)
+    team_row = team_agg.to_frame().T
+    team_row.index = [team_name]
+
+    # Per player
+    player_agg = df_valid.groupby(['player_name', 'region'])['time_remaining_sec'].mean().round(1)
+    player_pivot = player_agg.reset_index().pivot(
+        index='player_name', columns='region', values='time_remaining_sec')
+
+    return pd.concat([team_row, player_pivot])
+
+
+def guess_time_by_country(df: pd.DataFrame, n: int = 15) -> Optional[pd.DataFrame]:
+    """Average time_remaining_sec per player per country (top N by frequency)."""
+    if 'time_remaining_sec' not in df.columns or 'correct_country' not in df.columns:
+        return None
+
+    df_valid = df[(df['status'] == 'guessed') &
+                  (df['correct_country'].notna()) &
+                  (~df['correct_country'].isin(['Unknown', 'Lost at Sea']))].copy()
+    df_valid['time_remaining_sec'] = pd.to_numeric(df_valid['time_remaining_sec'], errors='coerce')
+    df_valid = df_valid.dropna(subset=['time_remaining_sec'])
+
+    if df_valid.empty:
+        return None
+
+    # Get top N countries by frequency
+    top_countries = df_valid['correct_country'].value_counts().head(n).index.tolist()
+    df_top = df_valid[df_valid['correct_country'].isin(top_countries)]
+
+    result = df_top.groupby(['player_name', 'correct_country']).agg(
+        avg_time_remaining=('time_remaining_sec', 'mean'),
+        guesses=('time_remaining_sec', 'count')
+    ).round(1).reset_index()
+    result = result.sort_values(['player_name', 'avg_time_remaining'], ascending=[True, False])
+    return result
+
+
+def fastest_slowest_guesses(df: pd.DataFrame, n: int = 10, team_name: str = 'Team') -> tuple:
+    """Top N fastest and slowest guesses by team and per player."""
+    if 'time_remaining_sec' not in df.columns:
+        return None, None
+
+    df_valid = df[df['status'] == 'guessed'].copy()
+    df_valid['time_remaining_sec'] = pd.to_numeric(df_valid['time_remaining_sec'], errors='coerce')
+    df_valid = df_valid.dropna(subset=['time_remaining_sec'])
+
+    if df_valid.empty:
+        return None, None
+
+    cols = ['player_name', 'correct_country', 'distance_km', 'time_remaining_sec', 'game_id', 'round']
+
+    # Team level: fastest = highest time_remaining
+    fastest = df_valid.nlargest(n, 'time_remaining_sec')[cols]
+    slowest = df_valid.nsmallest(n, 'time_remaining_sec')[cols]
+
+    return fastest, slowest
+
+
+def no_pin_analysis(df: pd.DataFrame, team_name: str = 'Team') -> Optional[pd.DataFrame]:
+    """No-pin round analysis: frequency, loss rate, avg round duration."""
+    if 'status' not in df.columns:
+        return None
+
+    df_nopin = df[df['status'] == 'no_pin']
+    if df_nopin.empty:
+        return None
+
+    df_nopin = df_nopin.copy()
+    if 'round_duration_sec' in df_nopin.columns:
+        df_nopin['round_duration_sec'] = pd.to_numeric(df_nopin['round_duration_sec'], errors='coerce')
+
+    rows = []
+
+    # Team aggregate
+    team_nopin = df_nopin
+    team_total = len(df)
+    team_lost = 0
+    if 'won_round' in df_nopin.columns:
+        team_lost = len(team_nopin[team_nopin['won_round'] == False])
+    avg_dur = team_nopin['round_duration_sec'].mean() if 'round_duration_sec' in team_nopin.columns else None
+    rows.append({
+        'player_name': team_name,
+        'no_pin_count': len(team_nopin),
+        'total_rounds': team_total,
+        'no_pin_pct': round(len(team_nopin) / max(team_total, 1) * 100, 1),
+        'round_loss_pct': round(team_lost / max(len(team_nopin), 1) * 100, 1) if team_lost else 0.0,
+        'avg_round_duration_sec': round(avg_dur, 1) if avg_dur and not pd.isna(avg_dur) else '',
+    })
+
+    # Per player
+    for player_name, pdf in df_nopin.groupby('player_name'):
+        player_total = len(df[df['player_name'] == player_name])
+        lost = 0
+        if 'won_round' in pdf.columns:
+            lost = len(pdf[pdf['won_round'] == False])
+        avg_dur_p = pdf['round_duration_sec'].mean() if 'round_duration_sec' in pdf.columns else None
+        rows.append({
+            'player_name': player_name,
+            'no_pin_count': len(pdf),
+            'total_rounds': player_total,
+            'no_pin_pct': round(len(pdf) / max(player_total, 1) * 100, 1),
+            'round_loss_pct': round(lost / max(len(pdf), 1) * 100, 1) if lost else 0.0,
+            'avg_round_duration_sec': round(avg_dur_p, 1) if avg_dur_p and not pd.isna(avg_dur_p) else '',
+        })
+
+    return pd.DataFrame(rows)
+
+
+def no_pin_by_region(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """No-pin breakdown by region per player."""
+    if 'status' not in df.columns or 'region' not in df.columns:
+        return None
+
+    df_nopin = df[(df['status'] == 'no_pin') &
+                  (df['region'].notna()) &
+                  (~df['region'].isin(['Unknown', 'Other']))]
+    if df_nopin.empty:
+        return None
+
+    result = df_nopin.groupby(['player_name', 'region']).size().reset_index(name='no_pin_count')
+    result = result.sort_values(['player_name', 'no_pin_count'], ascending=[True, False])
+    return result
+
+
+def hesitation_index(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Team coordination latency: time between first and last guess per round."""
+    if 'time_remaining_sec' not in df.columns:
+        return None
+
+    df_valid = df[df['status'] == 'guessed'].copy()
+    df_valid['time_remaining_sec'] = pd.to_numeric(df_valid['time_remaining_sec'], errors='coerce')
+    df_valid = df_valid.dropna(subset=['time_remaining_sec'])
+
+    if df_valid.empty:
+        return None
+
+    # Per round: max(time_remaining) - min(time_remaining) = gap between first and last click
+    round_gap = df_valid.groupby(['game_id', 'round']).agg(
+        first_click=('time_remaining_sec', 'max'),
+        last_click=('time_remaining_sec', 'min'),
+        num_guessers=('time_remaining_sec', 'count')
+    )
+    round_gap['hesitation_sec'] = (round_gap['first_click'] - round_gap['last_click']).round(2)
+    round_gap = round_gap[round_gap['num_guessers'] > 1]  # Only rounds with 2+ guessers
+
+    if round_gap.empty:
+        return None
+
+    result = round_gap.reset_index()
+    result = result[['game_id', 'round', 'hesitation_sec', 'first_click', 'last_click']]
+    return result
+
+
+def pressure_response(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Performance after winning vs losing the previous round."""
+    if 'won_round' not in df.columns or 'game_date_parsed' not in df.columns:
+        return None
+
+    df_sorted = df[df['status'] == 'guessed'].sort_values(['game_id', 'round']).copy()
+    if df_sorted.empty:
+        return None
+
+    rows = []
+    for player_name, pdf in df_sorted.groupby('player_name'):
+        for game_id, gdf in pdf.groupby('game_id'):
+            gdf = gdf.sort_values('round')
+            rounds_list = gdf['round'].unique()
+            for i in range(1, len(rounds_list)):
+                prev_round = gdf[gdf['round'] == rounds_list[i - 1]]
+                curr_round = gdf[gdf['round'] == rounds_list[i]]
+                if prev_round.empty or curr_round.empty:
+                    continue
+                prev_won = prev_round.iloc[0].get('won_round', None)
+                curr_dist = curr_round.iloc[0].get('distance_km', None)
+                if prev_won is not None and curr_dist is not None:
+                    rows.append({
+                        'player_name': player_name,
+                        'prev_outcome': 'Won' if prev_won else 'Lost',
+                        'distance_km': curr_dist,
+                    })
+
+    if not rows:
+        return None
+
+    result_df = pd.DataFrame(rows)
+    summary = result_df.groupby(['player_name', 'prev_outcome']).agg(
+        avg_dist_km=('distance_km', 'mean'),
+        rounds=('distance_km', 'count')
+    ).round(1).reset_index()
+    return summary
 
 
 # ===================================================================
@@ -780,12 +1113,12 @@ def main():
     # ---- Best/Worst Countries ----
     best, worst = best_worst_countries(df, n=10)
     if not best.empty:
-        print_section("\u2b50 BEST COUNTRIES", "lowest avg distance per player, min 2 guesses")
+        print_section("\u2b50 BEST COUNTRIES", "lowest avg distance per player, min 3 guesses")
         for player, pdata in best.groupby('player_name', sort=True):
             print(f"\n  {player}:")
             print(pdata[['correct_country', 'avg_dist_km', 'num_guesses']].to_string(index=False))
     if not worst.empty:
-        print_section("\U0001f4a9 WORST COUNTRIES", "highest avg distance per player, min 2 guesses")
+        print_section("\U0001f4a9 WORST COUNTRIES", "highest avg distance per player, min 3 guesses")
         for player, pdata in worst.groupby('player_name', sort=True):
             print(f"\n  {player}:")
             print(pdata[['correct_country', 'avg_dist_km', 'num_guesses']].to_string(index=False))
@@ -815,6 +1148,58 @@ def main():
         print_section("\U0001f4c9 ROUNDS PLAYED TREND",
                       "how many rounds per game, win/loss round counts")
         print(rpt.to_string(index=False))
+
+    # ---- Initiative Summary ----
+    init_summary = initiative_summary(df)
+    if init_summary is not None:
+        print_section("\U0001f3af INITIATIVE SUMMARY",
+                      "who clicks first, participation rates")
+        print(init_summary.to_string(index=False))
+
+    # ---- No-Pin Analysis ----
+    nopin = no_pin_analysis(df)
+    if nopin is not None:
+        print_section("\u274c NO-PIN ANALYSIS",
+                      "rounds where player did not drop a pin")
+        print(nopin.to_string(index=False))
+
+        nopin_region = no_pin_by_region(df)
+        if nopin_region is not None:
+            print(f"\n  By region:")
+            print(nopin_region.to_string(index=False))
+
+    # ---- Guess Speed by Region ----
+    speed_region = guess_time_by_region(df)
+    if speed_region is not None:
+        print_section("\u23f1\ufe0f  GUESS SPEED BY REGION",
+                      "avg time remaining (sec) when guess submitted. Higher = faster.")
+        print(speed_region.round(1).to_string())
+
+    # ---- Fastest/Slowest Guesses ----
+    fastest, slowest = fastest_slowest_guesses(df) if 'time_remaining_sec' in df.columns else (None, None)
+    if fastest is not None:
+        print_section("\u26a1 FASTEST GUESSES", "highest time remaining = clicked earliest")
+        print(fastest.to_string(index=False))
+    if slowest is not None:
+        print(f"\n  Slowest guesses (lowest time remaining):")
+        print(slowest.to_string(index=False))
+
+    # ---- Hesitation Index ----
+    hes = hesitation_index(df)
+    if hes is not None:
+        print_section("\U0001f914 HESITATION INDEX",
+                      "gap between first and last guess per round (team coordination)")
+        avg_hes = hes['hesitation_sec'].mean()
+        print(f"  Average hesitation: {avg_hes:.1f}s across {len(hes)} rounds")
+        print(f"\n  Most hesitation:")
+        print(hes.nlargest(5, 'hesitation_sec').to_string(index=False))
+
+    # ---- Pressure Response ----
+    pressure = pressure_response(df)
+    if pressure is not None:
+        print_section("\U0001f4aa PRESSURE RESPONSE",
+                      "avg distance after winning vs losing the previous round")
+        print(pressure.to_string(index=False))
 
     # ---- Player-specific analysis ----
     if args.player:
