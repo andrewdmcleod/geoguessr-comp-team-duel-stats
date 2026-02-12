@@ -106,11 +106,28 @@ def load_data(csv_file: str) -> pd.DataFrame:
 # Analysis functions
 # ===================================================================
 
+def _filter_guess_clicked(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter to rows where the player actively clicked guess (not auto pin-drop).
+
+    time_remaining_sec (v0.3.0+): seconds left when guess was submitted.
+    Values < 1 mean the timer expired and the pin was auto-submitted.
+
+    time_seconds (all versions): round duration — same for all players in a round,
+    so it CANNOT distinguish individual click vs pin-drop. We don't filter on it.
+    """
+    if 'time_remaining_sec' in df.columns:
+        tr = pd.to_numeric(df['time_remaining_sec'], errors='coerce')
+        return df[tr >= 1]
+    # Without time_remaining_sec, we can't distinguish — return all rows
+    return df
+
+
 def player_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Overall player statistics.
 
-    avg_time_sec and median_time_sec only count rounds where time_seconds > 1,
-    meaning the player actively clicked guess (not just a pin drop).
+    avg_time_sec and median_time_sec only count rounds where the player actively
+    clicked guess (time_remaining_sec >= 1), not auto-submitted pin drops.
+    Falls back to all rows when time_remaining_sec is unavailable.
     """
     # Distance stats use all rows
     dist_stats = df.groupby(['player_id', 'player_name']).agg({
@@ -120,8 +137,8 @@ def player_summary(df: pd.DataFrame) -> pd.DataFrame:
     dist_stats.columns = ['avg_dist_km', 'median_dist_km', 'best_dist_km',
                           'worst_dist_km', 'std_dist_km', 'total_guesses']
 
-    # Time stats only count guess-clicked rounds (time_seconds > 1)
-    df_clicked = df[df['time_seconds'] > 1]
+    # Time stats only count guess-clicked rounds
+    df_clicked = _filter_guess_clicked(df)
     if len(df_clicked) > 0:
         time_stats = df_clicked.groupby(['player_id', 'player_name']).agg({
             'time_seconds': ['mean', 'median', 'count']
@@ -181,10 +198,11 @@ def accuracy_ranking(df: pd.DataFrame) -> pd.DataFrame:
 def speed_ranking(df: pd.DataFrame) -> pd.DataFrame:
     """Rank players by speed.
 
-    Only includes rounds where the player actively clicked guess (time_seconds > 1).
-    Also excludes score == 0 and distance > 10,000 km.
+    Only includes rounds where the player actively clicked guess
+    (time_remaining_sec >= 1 when available). Also excludes score == 0
+    and distance > 10,000 km.
     """
-    df_timed = df[df['time_seconds'] > 1]
+    df_timed = _filter_guess_clicked(df)
 
     # Exclude score == 0 (timeout / no pin) if score column exists
     if 'score' in df_timed.columns:
@@ -209,9 +227,10 @@ def speed_ranking(df: pd.DataFrame) -> pd.DataFrame:
 def speed_vs_accuracy(df: pd.DataFrame) -> pd.DataFrame:
     """Compare speed vs accuracy.
 
-    Only counts rounds where the player actively clicked guess (time_seconds > 1).
+    Only counts rounds where the player actively clicked guess
+    (time_remaining_sec >= 1 when available).
     """
-    df_timed = df[df['time_seconds'] > 1]
+    df_timed = _filter_guess_clicked(df)
     if 'score' in df_timed.columns:
         df_timed = df_timed[df_timed['score'] > 0]
     if 'distance_km' in df_timed.columns:
