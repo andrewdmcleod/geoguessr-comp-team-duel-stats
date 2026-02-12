@@ -10,8 +10,12 @@ Fetch and analyze your competitive team duel games from GeoGuessr. Exports detai
 - **Local caching** of raw API responses in `raw_data/` so re-runs never re-fetch game data
 - **Incremental mode** with `--csv` flag to only fetch new games and append to an existing CSV
 - **Multi-team detection** — automatically discovers all teams you've played on, with interactive menu or saved config
-- **31 CSV columns** including team_key, win/loss, health, damage, scores, team/round winners, and more
-- **Comprehensive analysis** with per-player, per-country, per-region breakdowns
+- **38 CSV columns** including team_key, win/loss, health, damage, scores, initiative/timing, and more
+- **Nickname caching** to `raw_data/nicknames.json` — avoids re-fetching player names every run
+- **Country name normalization** — handles Czechia/Czech Republic, Türkiye/Turkey, and other API mismatches
+- **Initiative/timing metrics** — who clicks first, no-pin tracking, guess speed analysis, hesitation index
+- **Game drilldown** — per-game round-by-round analysis with `game_detail.py`
+- **Comprehensive analysis** with per-player, per-country, per-region breakdowns and team aggregate rows
 - **Trend export** to JSON for feeding into LLMs for deeper trend analysis
 - **Grafana dashboard** via Docker Compose with auto-provisioned PostgreSQL, configurable via `.env`
 
@@ -161,6 +165,27 @@ python analyze_stats.py team_duels.csv --export analysis_output/
 python analyze_stats.py team_duels.csv --trend-export trends.json
 ```
 
+### Game drilldown
+
+Drill into individual games with `game_detail.py`:
+
+```bash
+# List recent games
+python game_detail.py team_duels.csv --list
+
+# Show the most recent game
+python game_detail.py team_duels.csv --last
+
+# Show a specific game
+python game_detail.py team_duels.csv GAME_ID
+
+# Export as JSON (for programmatic use)
+python game_detail.py team_duels.csv --last --json
+
+# Export as CSV
+python game_detail.py team_duels.csv GAME_ID --csv output_dir/
+```
+
 ### Typical workflow
 
 ```bash
@@ -184,22 +209,28 @@ The analysis script outputs:
 | **Accuracy Ranking** | Players ranked by average distance |
 | **Speed Ranking** | Players ranked by average time (excludes timeouts and no-pin guesses) |
 | **Speed vs Accuracy** | Efficiency score combining time and distance per player |
-| **Recent vs All-Time** | Last 10 games vs all-time stats with trend arrows (↑↓) per player |
+| **Recent vs All-Time** | Last 10 games vs all-time stats with 📈/📉 trend indicators per player |
 | **Team Stats Summary** | Avg/worst distance and avg time, split by win vs loss |
 | **Player Win/Loss Split** | Avg distance in wins vs losses per player |
-| **Won Team** | % of rounds each player beat their teammate (+ by move mode) |
+| **Won Team** | % of rounds each player beat their teammate (+ team aggregate row) |
 | **Won Round** | % of rounds each player had the best guess overall (+ by move mode) |
-| **Region Performance** | Average distance per player per continent |
-| **Move vs No-Move** | Distance, time, and accuracy comparison across game modes |
-| **Countries I Confuse** | "When it was X, I guessed Y" — top 10 per player |
-| **Best/Worst Countries** | Per player, countries with best/worst average distance (min 2 guesses) |
+| **Region Performance** | Average distance per player per continent (+ team aggregate row) |
+| **Move vs No-Move** | Distance, time, and accuracy comparison across game modes (+ team row) |
+| **Countries I Confuse** | "When it was X, I guessed Y" — top 10 per player (+ team aggregate) |
+| **Best/Worst Countries** | Per player, countries with best/worst average distance (min 3 guesses, + team) |
 | **Countries Worth Studying** | Importance-weighted: avg distance × log(frequency) for large countries |
 | **Competitive Advantage** | Countries where you outperform opponents (and vice versa) |
 | **Rounds Played Trend** | Avg rounds per game, avg rounds in wins vs losses |
+| **Initiative Summary** | Who clicks first, participation rates, no-pin counts per player |
+| **No-Pin Analysis** | Rounds where player didn't drop a pin: frequency, loss rate |
+| **Guess Speed by Region** | Avg time remaining when guess submitted, per region per player |
+| **Fastest/Slowest Guesses** | Top N quickest and slowest individual guesses |
+| **Hesitation Index** | Gap between first and last guess per round (team coordination metric) |
+| **Pressure Response** | Avg distance after winning vs losing the previous round |
 
 ## CSV Columns
 
-The exported CSV contains 31 columns:
+The exported CSV contains 38 columns:
 
 | Column | Description |
 |--------|-------------|
@@ -230,6 +261,14 @@ The exported CSV contains 31 columns:
 | `health_before` / `health_after` | Team health before/after the round |
 | `damage_dealt` | Damage dealt by the team this round |
 | `multiplier` | Round damage multiplier |
+| `guess_created` | ISO timestamp when the guess was submitted |
+| `round_start_time` | ISO timestamp of round start |
+| `round_end_time` | ISO timestamp of round end |
+| `timer_start_time` | ISO timestamp when the guess timer started |
+| `round_duration_sec` | Round duration in seconds |
+| `time_remaining_sec` | Seconds remaining when guess submitted (higher = clicked faster) |
+| `clicked_first` | Whether this player clicked first within their team |
+| `status` | `guessed` or `no_pin` (player did not drop a pin) |
 
 ## How it works
 
@@ -351,6 +390,12 @@ docker compose ps          # check status
 | **Player Win/Loss Split** | Average distance in wins vs losses per player |
 | **Competitive Advantage** | Countries where your team outperforms opponents |
 | **Recent vs All-Time** | Last 10 games vs all-time per-player comparison |
+| **Initiative Rate by Player** | How often each player clicks first + participation rate |
+| **Initiative Rate Over Time** | 5-game rolling initiative rate per player |
+| **Guess Speed by Region** | Avg time remaining when guess submitted, per region |
+| **No-Pin Analysis** | No-pin frequency, loss rate when no pin dropped |
+| **Hesitation Index** | Rolling avg gap between first and last guess (team coordination) |
+| **Pressure Response** | Avg distance after winning vs losing previous round |
 
 ### Export directory structure
 
