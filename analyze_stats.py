@@ -109,16 +109,23 @@ def load_data(csv_file: str) -> pd.DataFrame:
 def _filter_guess_clicked(df: pd.DataFrame) -> pd.DataFrame:
     """Filter to rows where the player actively clicked guess (not auto pin-drop).
 
-    time_remaining_sec (v0.3.0+): seconds left when guess was submitted.
-    Values < 1 mean the timer expired and the pin was auto-submitted.
+    In competitive team duels, one player clicks "Guess" which starts a 15-second
+    countdown. Other players can click before it expires. If they don't, their pin
+    is auto-submitted at round end (time_remaining ≈ 0).
 
-    time_seconds (all versions): round duration — same for all players in a round,
-    so it CANNOT distinguish individual click vs pin-drop. We don't filter on it.
+    time_remaining_sec (v0.3.0+): round_end_time - guess_created_time.
+      Higher = clicked earlier. Values < 1 = timer expired, auto-submitted.
+    time_seconds (all versions): guess_created_time - round_start_time.
+      Per-player elapsed time. When all players in a round have identical values,
+      they were all auto-submitted at round end. However, without time_remaining_sec
+      we can't reliably distinguish individual clicks, so we include all rows.
     """
     if 'time_remaining_sec' in df.columns:
         tr = pd.to_numeric(df['time_remaining_sec'], errors='coerce')
-        return df[tr >= 1]
-    # Without time_remaining_sec, we can't distinguish — return all rows
+        mask = tr >= 1
+        if mask.any():
+            return df[mask]
+    # Without time_remaining_sec, we can't reliably distinguish — return all rows
     return df
 
 

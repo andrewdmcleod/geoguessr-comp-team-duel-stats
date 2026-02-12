@@ -4,10 +4,16 @@ GeoGuessr Team Duel Stats Fetcher
 
 Fetches competitive team duel stats from GeoGuessr and exports to CSV.
 
-NOTE: The GeoGuessr API only provides each player's FINAL guess position.
-There is no way to distinguish between clicking "Guess" vs timer expiry,
-or first pin drop vs final pin position. Every guess entry is the final
-state when the round ended.
+Timing model: In competitive team duels, one player clicks "Guess" which
+starts a 15-second countdown. Other players can click within that window
+or their pin is auto-submitted at round end.
+
+Key derived columns:
+- time_seconds: guess_created - round_start (elapsed time per player)
+- time_remaining_sec: round_end - guess_created (higher = clicked earlier,
+  near 0 = auto-submitted pin drop, ~15 = triggered the countdown)
+- clicked_first: True for the player who triggered the countdown
+- status: 'guessed' (has a guess row) or 'no_pin' (no guess at all)
 """
 
 import json
