@@ -1,0 +1,54 @@
+# GeoGuessr Team Duel Stats — Grafana + PostgreSQL
+#
+# Usage:
+#   docker compose up -d        # start services
+#   docker compose down          # stop and remove containers
+#   docker compose logs -f       # tail logs
+#   docker compose ps            # check status
+#
+# The dashboard launcher script (geoguessr_dashboard.py) wraps these
+# commands and also handles data loading into Postgres.
+#
+# Configuration:
+#   Edit .env to change ports, credentials, or image versions.
+#   Edit grafana/provisioning/ for datasource and dashboard config.
+#   Edit grafana/dashboards/ for dashboard panel definitions.
+
+services:
+  postgres:
+    image: ${PG_IMAGE:-postgres:16-alpine}
+    container_name: ${PG_CONTAINER:-geoguessr-postgres}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-geoguessr}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-geoguessr}
+      POSTGRES_DB: ${PG_DB:-geoguessr}
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-geoguessr}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:11.4.0}
+    container_name: ${GRAFANA_CONTAINER:-geoguessr-grafana}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-geoguessr}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/overview.json
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

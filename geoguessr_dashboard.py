@@ -3,12 +3,17 @@
 GeoGuessr Dashboard Launcher
 
 One-command Grafana dashboard workflow:
-1. Starts ephemeral Postgres + Grafana via Docker
+1. Starts ephemeral Postgres + Grafana via docker compose
 2. Loads the latest (or selected) export into Postgres
-3. Provisions Grafana automatically (datasource + dashboards)
+3. Grafana is auto-provisioned (datasource + dashboards via mounted files)
 4. Prints a clickable Grafana URL when ready
 
-Requires: Docker (docker compose or docker CLI)
+Configuration:
+  docker-compose.yml  — service definitions (images, healthchecks, volumes)
+  .env                — ports, credentials, image versions (copy from .env.example)
+  grafana/            — provisioning and dashboard JSON files
+
+Requires: Docker with compose plugin (docker compose)
 """
 
 import argparse
@@ -19,28 +24,49 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from datetime import datetime
-
-# ===================================================================
-# Configuration
-# ===================================================================
-
-DOCKER_NETWORK = 'geoguessr-stats'
-PG_CONTAINER = 'geoguessr-postgres'
-GRAFANA_CONTAINER = 'geoguessr-grafana'
-PG_USER = 'geoguessr'
-PG_PASS = 'geoguessr'
-PG_DB = 'geoguessr'
-PG_SCHEMA = 'geoguessr'
-GRAFANA_ADMIN_USER = 'admin'
-GRAFANA_ADMIN_PASS = 'geoguessr'
 
 
 # ===================================================================
-# Docker helpers
+# Load settings from .env (or defaults matching docker-compose.yml)
 # ===================================================================
 
-def run_cmd(cmd: list, capture=False, check=True, timeout=60) -> subprocess.CompletedProcess:
+def load_env(project_dir: str) -> dict:
+    """Load configuration from .env file, falling back to defaults.
+
+    These defaults match docker-compose.yml's ${VAR:-default} syntax.
+    """
+    defaults = {
+        'PG_CONTAINER': 'geoguessr-postgres',
+        'PG_USER': 'geoguessr',
+        'PG_PASSWORD': 'geoguessr',
+        'PG_DB': 'geoguessr',
+        'PG_PORT': '5432',
+        'PG_SCHEMA': 'geoguessr',
+        'GRAFANA_CONTAINER': 'geoguessr-grafana',
+        'GRAFANA_ADMIN_USER': 'admin',
+        'GRAFANA_ADMIN_PASSWORD': 'geoguessr',
+        'GRAFANA_PORT': '3000',
+    }
+
+    env_file = os.path.join(project_dir, '.env')
+    if os.path.isfile(env_file):
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, _, value = line.partition('=')
+                defaults[key.strip()] = value.strip()
+
+    return defaults
+
+
+# ===================================================================
+# Shell helpers
+# ===================================================================
+
+def run_cmd(cmd: list, capture=False, check=True, timeout=60,
+            cwd=None) -> subprocess.CompletedProcess:
     """Run a shell command."""
     try:
         return subprocess.run(
@@ -49,6 +75,7 @@ def run_cmd(cmd: list, capture=False, check=True, timeout=60) -> subprocess.Comp
             text=True,
             check=check,
             timeout=timeout,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         print(f"  ❌ Command timed out after {timeout}s: {' '.join(cmd)}")
@@ -61,159 +88,66 @@ def run_cmd(cmd: list, capture=False, check=True, timeout=60) -> subprocess.Comp
         raise
 
 
-def docker_available() -> bool:
-    """Check if Docker is available and running."""
+def docker_compose_available(project_dir: str) -> bool:
+    """Check if docker compose is available."""
     try:
-        result = run_cmd(['docker', 'info'], capture=True, check=False)
+        result = run_cmd(
+            ['docker', 'compose', 'version'],
+            capture=True, check=False, cwd=project_dir
+        )
         return result.returncode == 0
     except FileNotFoundError:
         return False
 
 
-def container_running(name: str) -> bool:
-    """Check if a Docker container is running."""
-    try:
-        result = run_cmd(
-            ['docker', 'inspect', '--format', '{{.State.Running}}', name],
-            capture=True, check=False
-        )
-        return result.stdout.strip() == 'true'
-    except Exception:
-        return False
-
-
-def container_exists(name: str) -> bool:
-    """Check if a Docker container exists (running or stopped)."""
-    try:
-        result = run_cmd(
-            ['docker', 'inspect', name],
-            capture=True, check=False
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def stop_container(name: str):
-    """Stop and remove a container if it exists."""
-    if container_exists(name):
-        run_cmd(['docker', 'rm', '-f', name], capture=True, check=False)
-
-
-def network_exists(name: str) -> bool:
-    """Check if a Docker network exists."""
-    try:
-        result = run_cmd(
-            ['docker', 'network', 'inspect', name],
-            capture=True, check=False
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def ensure_network():
-    """Create the Docker network if it doesn't exist."""
-    if not network_exists(DOCKER_NETWORK):
-        print(f"  Creating Docker network: {DOCKER_NETWORK}")
-        run_cmd(['docker', 'network', 'create', DOCKER_NETWORK], capture=True)
-
-
 # ===================================================================
-# Postgres
+# Docker Compose wrappers
 # ===================================================================
 
-def start_postgres(port: int = 5432, timeout: int = 60):
-    """Start an ephemeral Postgres container."""
-    stop_container(PG_CONTAINER)
+def compose_up(project_dir: str, services: list = None, timeout: int = 60):
+    """Run docker compose up -d [services]."""
+    cmd = ['docker', 'compose', 'up', '-d', '--wait',
+           '--wait-timeout', str(timeout)]
+    if services:
+        cmd.extend(services)
+    print(f"  Running: {' '.join(cmd)}")
+    run_cmd(cmd, capture=False, cwd=project_dir, timeout=timeout + 30)
 
-    print(f"  Starting PostgreSQL on port {port}...")
-    run_cmd([
-        'docker', 'run', '-d',
-        '--name', PG_CONTAINER,
-        '--network', DOCKER_NETWORK,
-        '-e', f'POSTGRES_USER={PG_USER}',
-        '-e', f'POSTGRES_PASSWORD={PG_PASS}',
-        '-e', f'POSTGRES_DB={PG_DB}',
-        '-p', f'{port}:5432',
-        'postgres:16-alpine',
-    ], capture=True)
 
-    # Poll until ready
-    print(f"  Waiting for PostgreSQL to be ready...")
+def compose_down(project_dir: str):
+    """Run docker compose down."""
+    run_cmd(
+        ['docker', 'compose', 'down', '--remove-orphans'],
+        capture=True, check=False, cwd=project_dir, timeout=30
+    )
+
+
+def compose_ps(project_dir: str) -> str:
+    """Run docker compose ps and return output."""
+    result = run_cmd(
+        ['docker', 'compose', 'ps', '--format', 'table'],
+        capture=True, check=False, cwd=project_dir
+    )
+    return result.stdout
+
+
+def wait_for_healthy(container_name: str, timeout: int = 60):
+    """Poll until a container's healthcheck passes."""
     start = time.time()
     while time.time() - start < timeout:
         try:
             result = run_cmd(
-                ['docker', 'exec', PG_CONTAINER, 'pg_isready', '-U', PG_USER],
+                ['docker', 'inspect', '--format',
+                 '{{.State.Health.Status}}', container_name],
                 capture=True, check=False, timeout=5
             )
-            if result.returncode == 0:
-                print(f"  ✅ PostgreSQL ready ({time.time() - start:.1f}s)")
+            status = result.stdout.strip()
+            if status == 'healthy':
                 return
         except Exception:
             pass
         time.sleep(1)
-
-    raise TimeoutError(f"PostgreSQL failed to start within {timeout}s")
-
-
-def get_pg_dsn(port: int = 5432) -> str:
-    """Get the PostgreSQL DSN for local connection."""
-    return f'postgresql://{PG_USER}:{PG_PASS}@localhost:{port}/{PG_DB}'
-
-
-def get_pg_dsn_internal() -> str:
-    """Get the PostgreSQL DSN for container-to-container connection."""
-    return f'postgresql://{PG_USER}:{PG_PASS}@{PG_CONTAINER}:5432/{PG_DB}'
-
-
-# ===================================================================
-# Grafana
-# ===================================================================
-
-def start_grafana(port: int = 3000, project_dir: str = '.', timeout: int = 60):
-    """Start Grafana container with provisioning."""
-    stop_container(GRAFANA_CONTAINER)
-
-    prov_dir = os.path.join(project_dir, 'grafana', 'provisioning')
-    dash_dir = os.path.join(project_dir, 'grafana', 'dashboards')
-
-    if not os.path.isdir(prov_dir):
-        raise FileNotFoundError(f"Grafana provisioning directory not found: {prov_dir}")
-
-    print(f"  Starting Grafana on port {port}...")
-    run_cmd([
-        'docker', 'run', '-d',
-        '--name', GRAFANA_CONTAINER,
-        '--network', DOCKER_NETWORK,
-        '-e', f'GF_SECURITY_ADMIN_USER={GRAFANA_ADMIN_USER}',
-        '-e', f'GF_SECURITY_ADMIN_PASSWORD={GRAFANA_ADMIN_PASS}',
-        '-e', 'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/overview.json',
-        '-v', f'{os.path.abspath(prov_dir)}:/etc/grafana/provisioning:ro',
-        '-v', f'{os.path.abspath(dash_dir)}:/var/lib/grafana/dashboards:ro',
-        '-p', f'{port}:3000',
-        'grafana/grafana:11.4.0',
-    ], capture=True)
-
-    # Poll until ready
-    print(f"  Waiting for Grafana to be ready...")
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            result = run_cmd(
-                ['docker', 'exec', GRAFANA_CONTAINER,
-                 'curl', '-sf', 'http://localhost:3000/api/health'],
-                capture=True, check=False, timeout=5
-            )
-            if result.returncode == 0:
-                print(f"  ✅ Grafana ready ({time.time() - start:.1f}s)")
-                return
-        except Exception:
-            pass
-        time.sleep(1)
-
-    raise TimeoutError(f"Grafana failed to start within {timeout}s")
+    raise TimeoutError(f"{container_name} not healthy within {timeout}s")
 
 
 # ===================================================================
@@ -267,7 +201,7 @@ def resolve_export(export_arg: str, outdir: str) -> str:
 # Data loading
 # ===================================================================
 
-def load_data_to_postgres(csv_file: str, dsn: str, schema: str = PG_SCHEMA):
+def load_data_to_postgres(csv_file: str, dsn: str, schema: str):
     """Load a CSV file into Postgres using pg_push."""
     import csv as csv_module
     from pg_push import push_to_postgres
@@ -292,20 +226,6 @@ def load_data_to_postgres(csv_file: str, dsn: str, schema: str = PG_SCHEMA):
 
 
 # ===================================================================
-# Cleanup
-# ===================================================================
-
-def cleanup():
-    """Stop and remove all containers."""
-    print("\n🧹 Cleaning up Docker containers...")
-    stop_container(GRAFANA_CONTAINER)
-    stop_container(PG_CONTAINER)
-    if network_exists(DOCKER_NETWORK):
-        run_cmd(['docker', 'network', 'rm', DOCKER_NETWORK], capture=True, check=False)
-    print("  ✅ Cleanup complete")
-
-
-# ===================================================================
 # Main
 # ===================================================================
 
@@ -314,6 +234,11 @@ def main():
         description='Launch GeoGuessr Grafana Dashboard',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Configuration files:
+  docker-compose.yml  — Docker service definitions
+  .env                — Ports, credentials, image versions (cp .env.example .env)
+  grafana/            — Provisioning and dashboard JSON files
+
 Examples:
   # Launch with latest export data
   python geoguessr_dashboard.py --config config.json
@@ -325,10 +250,10 @@ Examples:
   python geoguessr_dashboard.py --config config.json --refresh
 
   # List available exports
-  python geoguessr_dashboard.py --config config.json --list-exports
+  python geoguessr_dashboard.py --list-exports
 
-  # Custom ports
-  python geoguessr_dashboard.py --config config.json --pg-port 5433 --grafana-port 3001
+  # Custom ports (edit .env or pass overrides)
+  GRAFANA_PORT=3001 PG_PORT=5433 python geoguessr_dashboard.py --config config.json
 
   # Stop the dashboard
   python geoguessr_dashboard.py --stop
@@ -339,30 +264,30 @@ Examples:
     parser.add_argument('--outdir', type=str, default='out',
                         help='Base output directory (default: out)')
     parser.add_argument('--export', type=str, default='latest',
-                        help='Export to load: "latest", an export_id, or a CSV path (default: latest)')
+                        help='Export to load: "latest", an export_id, or a CSV path '
+                             '(default: latest)')
     parser.add_argument('--list-exports', action='store_true',
                         help='List existing exports and exit')
-    parser.add_argument('--team', type=str, default=None,
-                        help='Team ID filter (not yet implemented)')
     parser.add_argument('--refresh', action='store_true',
-                        help='Run the fetcher/analyzer first to create a fresh export')
+                        help='Run the fetcher first to create a fresh export')
     parser.add_argument('--rebuild-db', action='store_true',
-                        help='Force replace mode even if containers already running')
+                        help='Force drop + recreate Postgres tables')
     parser.add_argument('--no-grafana', action='store_true',
                         help='Only start Postgres and load data (debug mode)')
-    parser.add_argument('--pg-port', type=int, default=5432,
-                        help='PostgreSQL host port (default: 5432)')
-    parser.add_argument('--grafana-port', type=int, default=3000,
-                        help='Grafana host port (default: 3000)')
     parser.add_argument('--docker-timeout', type=int, default=60,
-                        help='Timeout in seconds for Docker containers to start')
+                        help='Timeout in seconds for containers to become healthy')
     parser.add_argument('--stop', action='store_true',
-                        help='Stop the dashboard (remove containers) and exit')
+                        help='Stop the dashboard (docker compose down) and exit')
     args = parser.parse_args()
+
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    env = load_env(project_dir)
 
     # Handle --stop
     if args.stop:
-        cleanup()
+        print("🧹 Stopping dashboard...")
+        compose_down(project_dir)
+        print("  ✅ Done")
         return
 
     # Handle --list-exports
@@ -372,31 +297,33 @@ Examples:
             print(f"No exports found in {exports_dir}")
             return
         exports = sorted(exports_dir.iterdir(), reverse=True)
-        if not exports:
+        dirs = [d for d in exports if d.is_dir()]
+        if not dirs:
             print(f"No exports found in {exports_dir}")
             return
         print(f"📦 Exports in {exports_dir} (newest first):")
-        for d in exports:
-            if d.is_dir():
-                print(f"  {d.name}")
+        for d in dirs:
+            print(f"  {d.name}")
         return
 
     # Pre-flight checks
     print("🎮 GeoGuessr Dashboard Launcher")
     print("=" * 50)
 
-    if not docker_available():
-        print("❌ Docker is not available or not running.")
-        print("   Install Docker: https://docs.docker.com/get-docker/")
+    compose_file = os.path.join(project_dir, 'docker-compose.yml')
+    if not os.path.isfile(compose_file):
+        print(f"❌ docker-compose.yml not found at: {compose_file}")
         sys.exit(1)
 
-    project_dir = os.path.dirname(os.path.abspath(__file__))
+    if not docker_compose_available(project_dir):
+        print("❌ 'docker compose' is not available.")
+        print("   Install Docker Desktop or the compose plugin:")
+        print("   https://docs.docker.com/compose/install/")
+        sys.exit(1)
 
-    # Check Grafana provisioning files exist
     prov_dir = os.path.join(project_dir, 'grafana', 'provisioning')
     if not os.path.isdir(prov_dir) and not args.no_grafana:
         print(f"❌ Grafana provisioning not found at: {prov_dir}")
-        print("   Make sure the grafana/ directory exists in the project root.")
         sys.exit(1)
 
     # Handle --refresh
@@ -404,13 +331,10 @@ Examples:
         print("\n🔄 Refreshing data...")
         refresh_cmd = [
             sys.executable, os.path.join(project_dir, 'geoguessr_stats.py'),
-            '--config' if '--config' in sys.argv else '', args.config,
             '--outdir', args.outdir,
         ]
-        # Filter empty strings
-        refresh_cmd = [c for c in refresh_cmd if c]
         try:
-            run_cmd(refresh_cmd, timeout=300)
+            run_cmd(refresh_cmd, timeout=300, cwd=project_dir)
         except Exception as e:
             print(f"  ⚠️  Refresh failed: {e}")
             print("  Continuing with existing data...")
@@ -424,62 +348,62 @@ Examples:
         print(f"❌ {e}")
         sys.exit(1)
 
-    # Step 1: Create Docker network
-    print(f"\n🐳 Setting up Docker environment...")
-    ensure_network()
+    # Determine which services to start
+    services = ['postgres']
+    if not args.no_grafana:
+        services.append('grafana')
 
-    # Step 2: Start Postgres
-    print(f"\n🐘 Starting PostgreSQL...")
+    # Step 1: docker compose up
+    print(f"\n🐳 Starting services: {', '.join(services)}")
+    print(f"   (images and config defined in docker-compose.yml + .env)")
     try:
-        start_postgres(port=args.pg_port, timeout=args.docker_timeout)
+        compose_up(project_dir, services=services, timeout=args.docker_timeout)
     except Exception as e:
-        print(f"❌ Failed to start PostgreSQL: {e}")
-        cleanup()
+        print(f"❌ Failed to start services: {e}")
+        compose_down(project_dir)
         sys.exit(1)
 
-    # Step 3: Load data
+    # Step 2: Load data into Postgres
+    pg_port = int(env.get('PG_PORT', '5432'))
+    pg_user = env.get('PG_USER', 'geoguessr')
+    pg_pass = env.get('PG_PASSWORD', 'geoguessr')
+    pg_db = env.get('PG_DB', 'geoguessr')
+    pg_schema = env.get('PG_SCHEMA', 'geoguessr')
+    dsn = f'postgresql://{pg_user}:{pg_pass}@localhost:{pg_port}/{pg_db}'
+
     print(f"\n📊 Loading data into PostgreSQL...")
-    dsn = get_pg_dsn(args.pg_port)
     try:
-        load_data_to_postgres(csv_file, dsn)
+        load_data_to_postgres(csv_file, dsn, schema=pg_schema)
     except Exception as e:
         print(f"❌ Failed to load data: {e}")
-        cleanup()
+        compose_down(project_dir)
         sys.exit(1)
 
-    # Step 4: Start Grafana
-    if not args.no_grafana:
-        print(f"\n📈 Starting Grafana...")
-        try:
-            start_grafana(
-                port=args.grafana_port,
-                project_dir=project_dir,
-                timeout=args.docker_timeout,
-            )
-        except Exception as e:
-            print(f"❌ Failed to start Grafana: {e}")
-            cleanup()
-            sys.exit(1)
-
     # Done!
+    grafana_port = int(env.get('GRAFANA_PORT', '3000'))
+    grafana_user = env.get('GRAFANA_ADMIN_USER', 'admin')
+    grafana_pass = env.get('GRAFANA_ADMIN_PASSWORD', 'geoguessr')
+
     print(f"\n{'=' * 50}")
     print(f"✅ Dashboard is ready!")
     print(f"{'=' * 50}")
 
     if not args.no_grafana:
-        url = f"http://localhost:{args.grafana_port}"
-        print(f"\n  🌐 Grafana URL: {url}")
-        print(f"  👤 Username:    {GRAFANA_ADMIN_USER}")
-        print(f"  🔑 Password:    {GRAFANA_ADMIN_PASS}")
+        print(f"\n  🌐 Grafana URL: http://localhost:{grafana_port}")
+        print(f"  👤 Username:    {grafana_user}")
+        print(f"  🔑 Password:    {grafana_pass}")
 
     print(f"\n  🐘 PostgreSQL:  {dsn}")
-    print(f"\n  To stop: python geoguessr_dashboard.py --stop")
+    print(f"\n  Configuration:  docker-compose.yml + .env")
+    print(f"  To stop:        python geoguessr_dashboard.py --stop")
+    print(f"                  (or: docker compose down)")
 
     # Wait for Ctrl+C
     print(f"\n  Press Ctrl+C to stop the dashboard...")
 
     def signal_handler(sig, frame):
-        cleanup()
+        print()
+        compose_down(project_dir)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -489,7 +413,7 @@ Examples:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        cleanup()
+        compose_down(project_dir)
 
 
 if __name__ == '__main__':

@@ -1,7 +1,8 @@
-"""Unit tests for export directory structure and latest.json resolution.
+"""Unit tests for export directory structure, latest.json resolution,
+and dashboard configuration helpers.
 
 Tests the export directory structure, latest.json pointer file,
-and the resolve_export() function from geoguessr_dashboard.py.
+the resolve_export() function, and load_env() from geoguessr_dashboard.py.
 These do NOT require Docker.
 """
 
@@ -13,7 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from geoguessr_dashboard import resolve_export
+from geoguessr_dashboard import resolve_export, load_env
 
 
 # ===================================================================
@@ -134,3 +135,69 @@ class TestExportDirStructure:
         assert 'game_id' in row
         assert 'player_name' in row
         assert 'distance_km' in row
+
+
+# ===================================================================
+# load_env() tests
+# ===================================================================
+
+class TestLoadEnv:
+    def test_defaults_without_env_file(self, tmp_path):
+        """When no .env file exists, returns sensible defaults."""
+        env = load_env(str(tmp_path))
+        assert env['PG_USER'] == 'geoguessr'
+        assert env['PG_PASSWORD'] == 'geoguessr'
+        assert env['PG_DB'] == 'geoguessr'
+        assert env['PG_PORT'] == '5432'
+        assert env['PG_SCHEMA'] == 'geoguessr'
+        assert env['GRAFANA_PORT'] == '3000'
+        assert env['GRAFANA_ADMIN_USER'] == 'admin'
+
+    def test_reads_env_file(self, tmp_path):
+        """Values from .env override defaults."""
+        env_file = tmp_path / '.env'
+        env_file.write_text('PG_PORT=15432\nGRAFANA_PORT=13000\n')
+        env = load_env(str(tmp_path))
+        assert env['PG_PORT'] == '15432'
+        assert env['GRAFANA_PORT'] == '13000'
+        # Non-overridden defaults still present
+        assert env['PG_USER'] == 'geoguessr'
+
+    def test_ignores_comments(self, tmp_path):
+        """Lines starting with # should be ignored."""
+        env_file = tmp_path / '.env'
+        env_file.write_text('# This is a comment\nPG_PORT=9999\n# Another comment\n')
+        env = load_env(str(tmp_path))
+        assert env['PG_PORT'] == '9999'
+
+    def test_ignores_blank_lines(self, tmp_path):
+        """Blank lines should be ignored."""
+        env_file = tmp_path / '.env'
+        env_file.write_text('\n\nPG_PORT=8888\n\n')
+        env = load_env(str(tmp_path))
+        assert env['PG_PORT'] == '8888'
+
+    def test_custom_keys_preserved(self, tmp_path):
+        """Extra env vars not in defaults should still be loaded."""
+        env_file = tmp_path / '.env'
+        env_file.write_text('CUSTOM_VAR=hello_world\n')
+        env = load_env(str(tmp_path))
+        assert env['CUSTOM_VAR'] == 'hello_world'
+
+    def test_equals_in_value(self, tmp_path):
+        """Values containing = should be handled correctly."""
+        env_file = tmp_path / '.env'
+        env_file.write_text('PG_PASSWORD=p@ss=word\n')
+        env = load_env(str(tmp_path))
+        assert env['PG_PASSWORD'] == 'p@ss=word'
+
+    def test_all_default_keys_present(self, tmp_path):
+        """All expected default keys should be present."""
+        env = load_env(str(tmp_path))
+        expected_keys = [
+            'PG_CONTAINER', 'PG_USER', 'PG_PASSWORD', 'PG_DB',
+            'PG_PORT', 'PG_SCHEMA', 'GRAFANA_CONTAINER',
+            'GRAFANA_ADMIN_USER', 'GRAFANA_ADMIN_PASSWORD', 'GRAFANA_PORT',
+        ]
+        for key in expected_keys:
+            assert key in env, f"Missing default key: {key}"

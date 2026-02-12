@@ -2,6 +2,7 @@
 config.json
 cookie.txt
 teams_config.json
+.env
 
 # Cached data and outputs
 raw_data/

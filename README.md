@@ -13,12 +13,14 @@ Fetch and analyze your competitive team duel games from GeoGuessr. Exports detai
 - **31 CSV columns** including team_key, win/loss, health, damage, scores, team/round winners, and more
 - **Comprehensive analysis** with per-player, per-country, per-region breakdowns
 - **Trend export** to JSON for feeding into LLMs for deeper trend analysis
+- **Grafana dashboard** via Docker Compose with auto-provisioned PostgreSQL, configurable via `.env`
 
 ## Prerequisites
 
 - **Python 3.8+**
 - **GeoGuessr Pro account** (team duels is a Pro feature; the API requires an active session)
 - **Google Maps API key** (recommended for reverse geocoding guess locations)
+- **Docker with compose plugin** (required for the Grafana dashboard)
 
 ## Quick Start
 
@@ -257,7 +259,7 @@ The script uses Google as the primary provider and automatically falls back to O
 
 ## Grafana Dashboard
 
-Visualize your stats in a Grafana dashboard backed by PostgreSQL. Requires Docker.
+Visualize your stats in a Grafana dashboard backed by PostgreSQL. Uses Docker Compose to manage the Postgres and Grafana containers.
 
 ### Quick start
 
@@ -265,11 +267,33 @@ Visualize your stats in a Grafana dashboard backed by PostgreSQL. Requires Docke
 # 1. Make sure you have data (run the fetcher first if needed)
 python geoguessr_stats.py --csv team_duels.csv
 
-# 2. Launch the dashboard (starts Postgres + Grafana in Docker)
+# 2. (Optional) Customize ports/credentials
+cp .env.example .env
+# Edit .env to change PG_PORT, GRAFANA_PORT, passwords, etc.
+
+# 3. Launch the dashboard (starts Postgres + Grafana via docker compose)
 python geoguessr_dashboard.py --config config.json
 
-# 3. Open http://localhost:3000 (admin / geoguessr)
+# 4. Open http://localhost:3000 (admin / geoguessr)
 ```
+
+### Configuration
+
+The dashboard is configured via `docker-compose.yml` and `.env`:
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.yml` | Service definitions (images, healthchecks, volumes) |
+| `.env` | Ports, credentials, image versions (copy from `.env.example`) |
+| `grafana/provisioning/` | Datasource and dashboard auto-provisioning |
+| `grafana/dashboards/` | Dashboard panel JSON definitions |
+
+Default credentials (override in `.env`):
+
+| Service | Port | Username | Password |
+|---------|------|----------|----------|
+| Grafana | 3000 | admin | geoguessr |
+| PostgreSQL | 5432 | geoguessr | geoguessr |
 
 ### Dashboard commands
 
@@ -286,11 +310,17 @@ python geoguessr_dashboard.py --config config.json --export 2025-02-10_143000
 # List available exports
 python geoguessr_dashboard.py --list-exports
 
-# Custom ports
-python geoguessr_dashboard.py --config config.json --pg-port 5433 --grafana-port 3001
+# Custom ports (edit .env, or override inline)
+GRAFANA_PORT=3001 PG_PORT=5433 python geoguessr_dashboard.py --config config.json
 
 # Stop the dashboard
 python geoguessr_dashboard.py --stop
+
+# Or use docker compose directly
+docker compose up -d      # start services
+docker compose down        # stop and remove containers
+docker compose logs -f     # tail logs
+docker compose ps          # check status
 ```
 
 ### Dashboard panels

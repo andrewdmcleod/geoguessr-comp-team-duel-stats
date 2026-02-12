@@ -5,7 +5,8 @@ datasources:
     type: postgres
     uid: geoguessr-postgres
     access: proxy
-    url: geoguessr-postgres:5432
+    # 'postgres' is the docker compose service name (resolves within the compose network)
+    url: postgres:5432
     user: geoguessr
     jsonData:
       database: geoguessr
