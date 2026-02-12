@@ -404,13 +404,21 @@ class TestGrafanaContainer:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
         panels = data.get('dashboard', {}).get('panels', [])
-        assert len(panels) == 11
+        assert len(panels) == 18
         titles = {p['title'] for p in panels}
         assert 'Team Rolling Avg Distance (km) Over Time' in titles
         assert 'Win Rate Over Time' in titles
         assert 'Countries Worth Studying' in titles
         assert 'Speed Ranking (Avg Guess Time)' in titles
         assert 'Summary Stats' in titles
+        # New panels
+        assert 'Won Team % (Beat Teammate)' in titles
+        assert 'Won Round % (Best Overall Guess)' in titles
+        assert 'Worst Countries (Highest Avg Distance)' in titles
+        assert 'Region Performance (Avg Distance by Continent)' in titles
+        assert 'Player Win/Loss Distance Split' in titles
+        assert 'Competitive Advantage by Country' in titles
+        assert 'Recent vs All-Time (Last 10 Games)' in titles
 
     def test_grafana_query_postgres_via_api(self, grafana_url, loaded_pg):
         """Query Postgres through Grafana's datasource proxy API."""

@@ -22,7 +22,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 
@@ -223,6 +225,81 @@ def load_data_to_postgres(csv_file: str, dsn: str, schema: str):
         schema=schema,
         if_exists='replace',
     )
+    return len(rows)
+
+
+# ===================================================================
+# Auto-refresh: scan for new games periodically
+# ===================================================================
+
+def auto_refresh_loop(project_dir: str, outdir: str, dsn: str,
+                      schema: str, interval: int, stop_event: threading.Event):
+    """Background thread that periodically fetches new games and reloads Postgres.
+
+    Runs geoguessr_stats.py to check for new games, then reloads the
+    latest export into Postgres if data has changed.
+    """
+    fetcher_script = os.path.join(project_dir, 'geoguessr_stats.py')
+    if not os.path.isfile(fetcher_script):
+        print(f"  ⚠️  Auto-refresh: fetcher script not found at {fetcher_script}")
+        return
+
+    while not stop_event.is_set():
+        # Sleep in small increments so we can respond to stop_event promptly
+        for _ in range(interval):
+            if stop_event.is_set():
+                return
+            time.sleep(1)
+
+        if stop_event.is_set():
+            return
+
+        now = datetime.now().strftime('%H:%M:%S')
+        print(f"\n  🔄 [{now}] Auto-refresh: checking for new games...")
+
+        # Read current row count from latest.json before refresh
+        latest_path = Path(outdir) / 'latest.json'
+        old_row_count = 0
+        if latest_path.exists():
+            try:
+                with open(latest_path) as f:
+                    old_row_count = json.load(f).get('total_rows', 0)
+            except Exception:
+                pass
+
+        # Run the fetcher
+        fetch_cmd = [
+            sys.executable, fetcher_script,
+            '--outdir', outdir,
+            '--no-teams-menu',
+        ]
+        try:
+            run_cmd(fetch_cmd, capture=True, check=True,
+                    timeout=300, cwd=project_dir)
+        except Exception as e:
+            print(f"  ⚠️  [{now}] Auto-refresh fetch failed: {e}")
+            continue
+
+        # Check if data changed
+        new_row_count = 0
+        if latest_path.exists():
+            try:
+                with open(latest_path) as f:
+                    new_row_count = json.load(f).get('total_rows', 0)
+            except Exception:
+                pass
+
+        if new_row_count > old_row_count:
+            new_games = new_row_count - old_row_count
+            print(f"  ✅ [{now}] Found new data ({new_games} new rows). Reloading Postgres...")
+            try:
+                csv_file = resolve_export('latest', outdir)
+                load_data_to_postgres(csv_file, dsn, schema)
+                print(f"  ✅ [{now}] Postgres reloaded. Grafana will show updated data.")
+            except Exception as e:
+                print(f"  ⚠️  [{now}] Failed to reload Postgres: {e}")
+        else:
+            print(f"  ℹ️  [{now}] No new games found.")
 
 
 # ===================================================================
@@ -252,6 +329,12 @@ Examples:
   # List available exports
   python geoguessr_dashboard.py --list-exports
 
+  # Auto-refresh: scan for new games every 5 minutes (default)
+  python geoguessr_dashboard.py --config config.json --watch
+
+  # Auto-refresh with custom interval (10 minutes)
+  python geoguessr_dashboard.py --config config.json --watch --watch-interval 600
+
   # Custom ports (edit .env or pass overrides)
   GRAFANA_PORT=3001 PG_PORT=5433 python geoguessr_dashboard.py --config config.json
 
@@ -276,6 +359,10 @@ Examples:
                         help='Only start Postgres and load data (debug mode)')
     parser.add_argument('--docker-timeout', type=int, default=60,
                         help='Timeout in seconds for containers to become healthy')
+    parser.add_argument('--watch', action='store_true',
+                        help='Auto-refresh: periodically scan for new games and reload')
+    parser.add_argument('--watch-interval', type=int, default=300,
+                        help='Seconds between auto-refresh checks (default: 300 = 5 min)')
     parser.add_argument('--stop', action='store_true',
                         help='Stop the dashboard (docker compose down) and exit')
     args = parser.parse_args()
@@ -398,11 +485,28 @@ Examples:
     print(f"  To stop:        python geoguessr_dashboard.py --stop")
     print(f"                  (or: docker compose down)")
 
+    # Start auto-refresh if --watch is enabled
+    stop_event = threading.Event()
+    watch_thread = None
+
+    if args.watch:
+        interval = max(60, args.watch_interval)  # Minimum 60 seconds
+        print(f"\n  👀 Auto-refresh enabled: checking for new games every {interval}s")
+        watch_thread = threading.Thread(
+            target=auto_refresh_loop,
+            args=(project_dir, args.outdir, dsn, pg_schema, interval, stop_event),
+            daemon=True,
+        )
+        watch_thread.start()
+
     # Wait for Ctrl+C
     print(f"\n  Press Ctrl+C to stop the dashboard...")
 
     def signal_handler(sig, frame):
         print()
+        stop_event.set()
+        if watch_thread and watch_thread.is_alive():
+            watch_thread.join(timeout=5)
         compose_down(project_dir)
         sys.exit(0)
 
@@ -413,6 +517,9 @@ Examples:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        stop_event.set()
+        if watch_thread and watch_thread.is_alive():
+            watch_thread.join(timeout=5)
         compose_down(project_dir)
 
 

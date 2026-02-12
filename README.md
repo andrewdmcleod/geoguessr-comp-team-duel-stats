@@ -310,6 +310,12 @@ python geoguessr_dashboard.py --config config.json --export 2025-02-10_143000
 # List available exports
 python geoguessr_dashboard.py --list-exports
 
+# Auto-refresh: scan for new games every 5 minutes while dashboard runs
+python geoguessr_dashboard.py --config config.json --watch
+
+# Auto-refresh with custom interval (10 minutes)
+python geoguessr_dashboard.py --config config.json --watch --watch-interval 600
+
 # Custom ports (edit .env, or override inline)
 GRAFANA_PORT=3001 PG_PORT=5433 python geoguessr_dashboard.py --config config.json
 
@@ -338,6 +344,13 @@ docker compose ps          # check status
 | **Move vs No-Move** | Distance comparison by movement mode |
 | **Speed Ranking** | Avg guess time + click rate % |
 | **Summary Stats** | Total games, guesses, players, avg distance, accuracy |
+| **Won Team %** | How often each player beat their teammate, by move mode |
+| **Won Round %** | How often each player had the best guess overall, by move mode |
+| **Worst Countries** | Highest avg distance per country per player |
+| **Region Performance** | Average distance per player per continent |
+| **Player Win/Loss Split** | Average distance in wins vs losses per player |
+| **Competitive Advantage** | Countries where your team outperforms opponents |
+| **Recent vs All-Time** | Last 10 games vs all-time per-player comparison |
 
 ### Export directory structure
 
