@@ -1,0 +1,259 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Team Rolling Avg Distance (km) Over Time",
+      "description": "5-game rolling average of team distance, lower is better",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT g.played_at AS time, AVG(gu.distance_km) OVER (ORDER BY g.played_at ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS rolling_avg_dist_km FROM geoguessr.games g JOIN geoguessr.guesses gu ON g.game_id = gu.game_id GROUP BY g.game_id, g.played_at ORDER BY g.played_at",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "km",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 2,
+      "title": "Player Rolling Avg Distance Over Time",
+      "description": "5-game rolling average per player",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT g.played_at AS time, gu.player_name, AVG(gu.distance_km) OVER (PARTITION BY gu.player_name ORDER BY g.played_at ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS rolling_avg FROM geoguessr.games g JOIN geoguessr.guesses gu ON g.game_id = gu.game_id ORDER BY g.played_at",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "km",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 5 }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 3,
+      "title": "Guess Time vs Distance (clicked guesses only)",
+      "description": "Scatter plot: speed vs accuracy per player. Excludes timeouts (score=0, dist>10000km)",
+      "type": "xychart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT gu.time_seconds, gu.distance_km, gu.player_name FROM geoguessr.guesses gu WHERE gu.time_seconds > 0 AND gu.score > 0 AND gu.distance_km <= 10000 ORDER BY gu.player_name",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "pointSize": { "fixed": 5 } }
+        }
+      },
+      "options": {
+        "seriesMapping": "manual",
+        "dims": { "x": "time_seconds", "y": "distance_km", "color": "player_name" }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Win Rate Over Time",
+      "description": "Team win rate calculated as a 10-game rolling window",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT played_at AS time, AVG(CASE WHEN game_won THEN 1.0 ELSE 0.0 END) OVER (ORDER BY played_at ROWS BETWEEN 9 PRECEDING AND CURRENT ROW) * 100 AS win_rate_pct FROM geoguessr.games WHERE game_won IS NOT NULL ORDER BY played_at",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "color": { "mode": "fixed", "fixedColor": "green" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 40 },
+              { "color": "green", "value": 50 }
+            ]
+          }
+        }
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 5,
+      "title": "Correct Country Rate Over Time",
+      "description": "10-game rolling correct country % (team + per player)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "WITH per_game AS (SELECT g.played_at, gu.player_name, AVG(CASE WHEN gu.correct_country_flag THEN 1.0 ELSE 0.0 END) AS acc FROM geoguessr.games g JOIN geoguessr.guesses gu ON g.game_id = gu.game_id WHERE gu.correct_country_flag IS NOT NULL GROUP BY g.game_id, g.played_at, gu.player_name) SELECT played_at AS time, player_name, AVG(acc) OVER (PARTITION BY player_name ORDER BY played_at ROWS BETWEEN 9 PRECEDING AND CURRENT ROW) * 100 AS country_acc_pct FROM per_game ORDER BY played_at",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 5 }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 6,
+      "title": "Countries Worth Studying",
+      "description": "Countries with worst average distance, weighted by frequency. Min 3 guesses.",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT r.pano_country_name AS country, ROUND(AVG(gu.distance_km)::numeric, 1) AS avg_dist_km, COUNT(*) AS guess_count, ROUND((AVG(gu.distance_km) * LN(COUNT(*) + 1))::numeric, 1) AS importance FROM geoguessr.guesses gu JOIN geoguessr.rounds r ON gu.game_id = r.game_id AND gu.round_number = r.round_number WHERE r.pano_country_name IS NOT NULL AND r.pano_country_name != '' AND r.pano_country_name != 'Unknown' GROUP BY r.pano_country_name HAVING COUNT(*) >= 3 ORDER BY importance DESC LIMIT 20",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "importance" }, "properties": [{ "id": "color", "value": { "mode": "continuous-RdYlGn", "reverse": true } }] }
+        ]
+      },
+      "options": { "orientation": "horizontal", "xField": "country", "stacking": "none" }
+    },
+    {
+      "id": 7,
+      "title": "Countries I Confuse",
+      "description": "Most common country confusion pairs (actual -> guessed)",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT gu.player_name, r.pano_country_name AS actual_country, gu.guessed_country AS guessed, COUNT(*) AS times FROM geoguessr.guesses gu JOIN geoguessr.rounds r ON gu.game_id = r.game_id AND gu.round_number = r.round_number WHERE gu.correct_country_flag = false AND r.pano_country_name IS NOT NULL AND r.pano_country_name != '' AND gu.guessed_country IS NOT NULL AND gu.guessed_country != '' AND gu.guessed_country != 'Unknown' AND gu.guessed_country != 'Lost at Sea' ORDER BY times DESC LIMIT 50",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": {} },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "times", "desc": true }] }
+    },
+    {
+      "id": 8,
+      "title": "Best Countries (Lowest Avg Distance)",
+      "description": "Countries with best accuracy per player, min 3 guesses",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT gu.player_name, r.pano_country_name AS country, ROUND(AVG(gu.distance_km)::numeric, 1) AS avg_dist_km, COUNT(*) AS guesses, ROUND(AVG(CASE WHEN gu.correct_country_flag THEN 1.0 ELSE 0.0 END)::numeric * 100, 1) AS correct_pct FROM geoguessr.guesses gu JOIN geoguessr.rounds r ON gu.game_id = r.game_id AND gu.round_number = r.round_number WHERE r.pano_country_name IS NOT NULL AND r.pano_country_name != '' GROUP BY gu.player_name, r.pano_country_name HAVING COUNT(*) >= 3 ORDER BY avg_dist_km ASC LIMIT 30",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": {} },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "avg_dist_km", "desc": false }] }
+    },
+    {
+      "id": 9,
+      "title": "Move vs No-Move: Avg Distance",
+      "description": "Performance comparison by movement mode per player",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT gu.player_name, g.move_mode, ROUND(AVG(gu.distance_km)::numeric, 1) AS avg_dist_km FROM geoguessr.games g JOIN geoguessr.guesses gu ON g.game_id = gu.game_id WHERE g.move_mode IS NOT NULL AND g.move_mode != '' GROUP BY gu.player_name, g.move_mode ORDER BY gu.player_name, g.move_mode",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } } },
+      "options": { "orientation": "vertical", "xField": "player_name", "stacking": "none" }
+    },
+    {
+      "id": 10,
+      "title": "Speed Ranking (Avg Guess Time)",
+      "description": "Average time per guess by player, excludes timeouts. Shows % of clicked guesses.",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT player_name, ROUND(AVG(CASE WHEN score > 0 AND distance_km <= 10000 THEN time_seconds END)::numeric, 1) AS avg_time_sec, COUNT(CASE WHEN score > 0 AND distance_km <= 10000 THEN 1 END) AS clicked_guesses, COUNT(*) AS total_guesses, ROUND(COUNT(CASE WHEN score > 0 AND distance_km <= 10000 THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1) AS click_rate_pct FROM geoguessr.guesses WHERE time_seconds > 0 GROUP BY player_name ORDER BY avg_time_sec ASC",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": {} },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "avg_time_sec", "desc": false }] }
+    },
+    {
+      "id": 11,
+      "title": "Summary Stats",
+      "description": "Key metrics at a glance",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 40 },
+      "datasource": { "uid": "geoguessr-postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(DISTINCT game_id) AS total_games, COUNT(*) AS total_guesses, COUNT(DISTINCT player_name) AS players, ROUND(AVG(distance_km)::numeric, 1) AS avg_dist_km, ROUND(AVG(CASE WHEN correct_country_flag THEN 1.0 ELSE 0.0 END)::numeric * 100, 1) AS country_acc_pct FROM geoguessr.guesses",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "avg_dist_km" }, "properties": [{ "id": "unit", "value": "km" }] },
+          { "matcher": { "id": "byName", "options": "country_acc_pct" }, "properties": [{ "id": "unit", "value": "percent" }] }
+        ]
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "horizontal", "textMode": "auto" }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["geoguessr"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1y", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "GeoGuessr Team Duel Stats",
+  "uid": "geoguessr-overview",
+  "version": 1
+}

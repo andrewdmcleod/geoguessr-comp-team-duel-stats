@@ -97,7 +97,8 @@ class GeoGuessrAPI:
         response.raise_for_status()
         return response.json()
 
-    def get_team_duel_game_ids(self, limit: Optional[int] = None) -> List[str]:
+    def get_team_duel_game_ids(self, limit: Optional[int] = None,
+                               max_pages: int = 50) -> List[str]:
         """Extract team duel game IDs from activity feed"""
         game_ids = []
         seen_ids = set()
@@ -160,7 +161,8 @@ class GeoGuessrAPI:
             page += 1
             time.sleep(0.3)
 
-            if page >= 50:
+            if page >= max_pages:
+                print(f"  Reached max pages limit ({max_pages}). Stopping pagination.")
                 break
 
         return game_ids
@@ -891,7 +893,54 @@ def main():
                              'that require configuration.')
     parser.add_argument('--teams-config', type=str, default='teams_config.json',
                         help='Path to teams configuration file (default: teams_config.json)')
+    parser.add_argument('--outdir', type=str, default='out',
+                        help='Base output directory (default: out)')
+    parser.add_argument('--export-id', type=str, default=None,
+                        help='Export ID (default: auto-generated timestamp)')
+    parser.add_argument('--export-dir', type=str, default=None,
+                        help='Override export directory path (ignores --outdir/--export-id)')
+    parser.add_argument('--no-latest-json', action='store_true',
+                        help='Do not write latest.json pointer file')
+    parser.add_argument('--list-exports', action='store_true',
+                        help='List existing exports and exit')
+    parser.add_argument('--to-postgres', type=str, default=None,
+                        help='Push data to PostgreSQL (DSN, e.g. postgresql://user:pass@host:5432/db)')
+    parser.add_argument('--pg-schema', type=str, default='geoguessr',
+                        help='PostgreSQL schema name (default: geoguessr)')
+    parser.add_argument('--pg-if-exists', type=str, default='replace',
+                        choices=['replace', 'append', 'skip'],
+                        help='Postgres table conflict strategy (default: replace)')
+    parser.add_argument('--pg-batch-size', type=int, default=5000,
+                        help='Postgres insert batch size (default: 5000)')
+    parser.add_argument('--max-pages', type=int, default=50,
+                        help='Maximum activity feed pages to fetch (default: 50)')
     args = parser.parse_args()
+
+    # Handle --list-exports
+    if args.list_exports:
+        exports_dir = Path(args.outdir) / 'exports'
+        if not exports_dir.exists():
+            print(f"No exports found in {exports_dir}")
+            return
+        exports = sorted(exports_dir.iterdir(), reverse=True)
+        if not exports:
+            print(f"No exports found in {exports_dir}")
+            return
+        print(f"📦 Exports in {exports_dir} (newest first):")
+        for d in exports:
+            if d.is_dir():
+                latest_json = Path(args.outdir) / 'latest.json'
+                is_latest = ''
+                if latest_json.exists():
+                    try:
+                        with open(latest_json) as f:
+                            lj = json.load(f)
+                        if lj.get('export_id') == d.name:
+                            is_latest = ' ← latest'
+                    except Exception:
+                        pass
+                print(f"  {d.name}{is_latest}")
+        return
 
     # Ensure raw data dirs exist
     ensure_raw_dirs()
@@ -961,7 +1010,7 @@ def main():
     if args.limit:
         print(f"   (Limited to {args.limit} games for testing)")
 
-    game_ids = api.get_team_duel_game_ids(limit=args.limit)
+    game_ids = api.get_team_duel_game_ids(limit=args.limit, max_pages=args.max_pages)
 
     if not game_ids:
         print("\u274c No team duel games found in activity feed!")
@@ -1229,8 +1278,22 @@ def main():
     else:
         all_rows = new_rows
 
-    # Export to CSV
-    output_file = args.csv or f"team_duel_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    # ================================================================
+    # Export to CSV (+ structured export directory)
+    # ================================================================
+
+    # Resolve export directory
+    export_id = args.export_id or datetime.now().strftime('%Y-%m-%d_%H%M%S')
+    if args.export_dir:
+        export_dir = Path(args.export_dir)
+    else:
+        export_dir = Path(args.outdir) / 'exports' / export_id
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write CSV to export dir
+    export_csv = export_dir / 'team_duels.csv'
+    # Also write to --csv path if specified (backward compat)
+    output_file = args.csv or str(export_csv)
 
     print(f"\n\U0001f4be Exporting to {output_file}...")
 
@@ -1243,8 +1306,50 @@ def main():
         print(f"\u2705 Exported {len(all_rows)} rows to {output_file}")
         if existing_rows:
             print(f"   ({len(existing_rows)} existing + {len(new_rows)} new)")
+
+        # Also write to export dir if --csv pointed elsewhere
+        if str(Path(output_file).resolve()) != str(export_csv.resolve()):
+            with open(export_csv, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+                writer.writeheader()
+                writer.writerows(all_rows)
+            print(f"   Also exported to {export_csv}")
     else:
         print("\u26a0\ufe0f  No data to export!")
+
+    # Write latest.json pointer
+    if not args.no_latest_json and all_rows:
+        latest_path = Path(args.outdir) / 'latest.json'
+        latest_path.parent.mkdir(parents=True, exist_ok=True)
+        latest_data = {
+            "latest_export_dir": str(export_dir),
+            "export_id": export_id,
+            "created_at": datetime.utcnow().isoformat() + 'Z',
+            "csv_file": str(export_csv),
+            "total_rows": len(all_rows),
+            "total_games": len(set(r['game_id'] for r in all_rows)),
+        }
+        with open(latest_path, 'w') as f:
+            json.dump(latest_data, f, indent=2)
+        print(f"   Updated {latest_path}")
+
+    # Push to Postgres if requested
+    if args.to_postgres and all_rows:
+        print(f"\n🐘 Pushing to PostgreSQL...")
+        try:
+            from pg_push import push_to_postgres
+            push_to_postgres(
+                rows=all_rows,
+                csv_columns=CSV_COLUMNS,
+                dsn=args.to_postgres,
+                schema=args.pg_schema,
+                if_exists=args.pg_if_exists,
+                batch_size=args.pg_batch_size,
+            )
+        except ImportError:
+            print("  ❌ pg_push module not found. Install psycopg2: pip install psycopg2-binary")
+        except Exception as e:
+            print(f"  ❌ Postgres push failed: {e}")
 
     if geocoder.api_calls > 0:
         print(f"\n\U0001f4ca Geocoding stats: {geocoder.api_calls} API calls, {len(geocoder.cache)} cached results")

@@ -255,6 +255,86 @@ Game details are cached locally in `raw_data/games/` as JSON files. This means:
 
 The script uses Google as the primary provider and automatically falls back to OpenCage, then Nominatim if the primary fails.
 
+## Grafana Dashboard
+
+Visualize your stats in a Grafana dashboard backed by PostgreSQL. Requires Docker.
+
+### Quick start
+
+```bash
+# 1. Make sure you have data (run the fetcher first if needed)
+python geoguessr_stats.py --csv team_duels.csv
+
+# 2. Launch the dashboard (starts Postgres + Grafana in Docker)
+python geoguessr_dashboard.py --config config.json
+
+# 3. Open http://localhost:3000 (admin / geoguessr)
+```
+
+### Dashboard commands
+
+```bash
+# Launch with latest export data
+python geoguessr_dashboard.py --config config.json
+
+# Refresh data before launching
+python geoguessr_dashboard.py --config config.json --refresh
+
+# Use a specific export
+python geoguessr_dashboard.py --config config.json --export 2025-02-10_143000
+
+# List available exports
+python geoguessr_dashboard.py --list-exports
+
+# Custom ports
+python geoguessr_dashboard.py --config config.json --pg-port 5433 --grafana-port 3001
+
+# Stop the dashboard
+python geoguessr_dashboard.py --stop
+```
+
+### Dashboard panels
+
+| Panel | Description |
+|-------|-------------|
+| **Team Rolling Avg Distance** | 5-game rolling average distance over time |
+| **Player Rolling Avg Distance** | Per-player rolling average (one series each) |
+| **Guess Time vs Distance** | Scatter plot of speed vs accuracy (excludes timeouts) |
+| **Win Rate Over Time** | 10-game rolling win rate |
+| **Correct Country Rate** | 10-game rolling country accuracy per player |
+| **Countries Worth Studying** | Worst countries weighted by frequency |
+| **Countries I Confuse** | Confusion pairs: actual vs guessed country |
+| **Best Countries** | Lowest avg distance per country per player |
+| **Move vs No-Move** | Distance comparison by movement mode |
+| **Speed Ranking** | Avg guess time + click rate % |
+| **Summary Stats** | Total games, guesses, players, avg distance, accuracy |
+
+### Export directory structure
+
+When using `--outdir` (default: `out/`), exports are organized as:
+
+```
+out/
+  latest.json              # Pointer to the most recent export
+  exports/
+    2025-02-10_143000/     # Timestamped export directory
+      team_duels.csv       # CSV data
+    2025-02-11_091500/
+      team_duels.csv
+```
+
+### Direct Postgres push
+
+You can also push data directly to any PostgreSQL database:
+
+```bash
+python geoguessr_stats.py --csv team_duels.csv \
+  --to-postgres postgresql://user:pass@localhost:5432/mydb \
+  --pg-schema geoguessr
+```
+
+This creates three normalized tables: `games`, `rounds`, and `guesses` with proper foreign keys and indexes.
+
 ## Known Limitations
 
 - The GeoGuessr API only provides each player's **final guess position**. There is no way to distinguish between clicking "Guess" vs timer expiry, or first pin drop vs final pin position.
