@@ -27,6 +27,23 @@ from country_codes import LARGE_COUNTRIES
 # Data loading
 # ===================================================================
 
+def detect_my_team(df: pd.DataFrame) -> set:
+    """Detect which players are on 'my team' using the most common team_key.
+
+    Returns set of player_ids belonging to the primary team.
+    """
+    if 'team_key' not in df.columns:
+        return set(df['player_id'].unique())
+
+    team_keys = df['team_key'].value_counts()
+    if team_keys.empty:
+        return set(df['player_id'].unique())
+
+    my_team_key = team_keys.index[0]
+    my_team_pids = set(df[df['team_key'] == my_team_key]['player_id'].unique())
+    return my_team_pids
+
+
 def load_data(csv_file: str) -> pd.DataFrame:
     """Load and validate CSV data"""
     df = pd.read_csv(csv_file)
@@ -420,15 +437,14 @@ def recent_vs_alltime(df: pd.DataFrame, recent_n: int = 10) -> Optional[pd.DataF
                 return ''
             diff = recent_val - all_val
             if abs(diff) < 0.05:
-                return '  ='
-            arrow = '\u2193' if diff < 0 else '\u2191'
-            # For distance/time, lower is better, so down arrow is good
-            # For accuracy/win rate, higher is better, so up arrow is good
+                return '  \u2796'  # ➖ stable
+            # Determine if the change is an improvement
             if lower_is_better:
-                color = '+' if diff < 0 else '-'
+                improving = diff < 0
             else:
-                color = '+' if diff > 0 else '-'
-            return f'{color}{arrow}{abs(diff):.1f}'
+                improving = diff > 0
+            icon = '\U0001f4c8' if improving else '\U0001f4c9'  # 📈 improving, 📉 declining
+            return f'{icon}{abs(diff):.1f}'
 
         rows.append({
             'player': player_name,
@@ -658,9 +674,18 @@ def main():
     print("\U0001f4ca GeoGuessr Team Duel Stats Analysis")
     print("=" * 60)
 
-    df = load_data(args.csv_file)
-    print(f"\n\u2705 Loaded {len(df)} guesses from {df['game_id'].nunique()} games")
-    print(f"   Players: {', '.join(df['player_name'].unique())}")
+    df_all = load_data(args.csv_file)
+    print(f"\n\u2705 Loaded {len(df_all)} guesses from {df_all['game_id'].nunique()} games")
+
+    # Filter to my team only (opponents only used for competitive_advantage)
+    my_team_pids = detect_my_team(df_all)
+    df = df_all[df_all['player_id'].isin(my_team_pids)].copy()
+
+    team_player_names = sorted(df['player_name'].unique())
+    print(f"   Team players: {', '.join(team_player_names)}")
+    if len(df) < len(df_all):
+        n_opponents = df_all['player_id'].nunique() - len(my_team_pids)
+        print(f"   ({n_opponents} opponent player(s) filtered from summaries)")
 
     # ---- Player Summary ----
     print_section("\U0001f4c8 PLAYER SUMMARY")
@@ -688,7 +713,7 @@ def main():
     rva = recent_vs_alltime(df)
     if rva is not None:
         print_section("\U0001f4c5 RECENT VS ALL-TIME",
-                      "last 10 games vs all-time. +\u2191=improving, -\u2193=declining")
+                      "last 10 games vs all-time. \U0001f4c8=improving, \U0001f4c9=declining")
         for player in rva['player'].unique():
             pdata = rva[rva['player'] == player]
             print(f"\n  {player}:")
@@ -773,7 +798,7 @@ def main():
         print(worth.to_string(index=False))
 
     # ---- Competitive Advantage ----
-    comp_adv = competitive_advantage(df)
+    comp_adv = competitive_advantage(df_all)
     if comp_adv is not None:
         print_section("\u2694\ufe0f  COMPETITIVE ADVANTAGE",
                       "countries where you outperform opponents (positive = your advantage)")

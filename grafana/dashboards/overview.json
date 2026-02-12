@@ -150,7 +150,7 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" } },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "importance" }, "properties": [{ "id": "color", "value": { "mode": "continuous-RdYlGn", "reverse": true } }] }
+          { "matcher": { "id": "byName", "options": "importance" }, "properties": [{ "id": "color", "value": { "mode": "continuous-RdYlGr", "reverse": true } }] }
         ]
       },
       "options": { "orientation": "horizontal", "xField": "country", "stacking": "none" }

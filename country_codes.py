@@ -264,6 +264,33 @@ def country_name_from_code(code: str) -> str:
     return COUNTRY_CODE_TO_NAME.get(code.upper(), f"Unknown ({code})")
 
 
+# Aliases: geocoding APIs sometimes return different names than our canonical list
+COUNTRY_ALIASES = {
+    'Czechia': 'Czech Republic',
+    'Eswatini': 'Swaziland',
+    'North Macedonia': 'Republic of North Macedonia',
+    'Timor-Leste': 'East Timor',
+    'Cabo Verde': 'Cape Verde',
+    'Türkiye': 'Turkey',
+    'Myanmar (Burma)': 'Myanmar',
+    'Côte d\'Ivoire': "Côte d'Ivoire",
+    'Republic of the Congo': 'Congo',
+    'State of Palestine': 'Palestine',
+    'Micronesia': 'Micronesia, Federated States of',
+}
+
+
+def normalize_country_name(name: str) -> str:
+    """Normalize a country name using canonical aliases.
+
+    Geocoding APIs may return 'Czechia' while our code uses 'Czech Republic'.
+    This ensures consistent matching.
+    """
+    if not name or name in ('Unknown', 'Lost at Sea', ''):
+        return name
+    return COUNTRY_ALIASES.get(name, name)
+
+
 # Maps each country code to its continent/region
 CODE_TO_REGION = {
     'AD': 'Europe',

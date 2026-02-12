@@ -19,7 +19,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from geopy.geocoders import Nominatim
@@ -31,7 +31,7 @@ try:
 except ImportError:
     HAS_QUESTIONARY = False
 
-from country_codes import country_name_from_code, CODE_TO_REGION
+from country_codes import country_name_from_code, CODE_TO_REGION, normalize_country_name
 
 # ---------------------------------------------------------------------------
 # CSV column order (30 columns)
@@ -47,6 +47,10 @@ CSV_COLUMNS = [
     'correct_country_flag', 'region',
     'is_team_best_guess', 'won_team', 'won_round', 'game_won',
     'health_before', 'health_after', 'damage_dealt', 'multiplier',
+    # Initiative & timing columns (v0.3.0)
+    'guess_created', 'round_start_time', 'round_end_time',
+    'timer_start_time', 'round_duration_sec', 'time_remaining_sec',
+    'clicked_first', 'status',
 ]
 
 # ---------------------------------------------------------------------------
@@ -55,12 +59,31 @@ CSV_COLUMNS = [
 RAW_DATA_DIR = Path('raw_data')
 RAW_GAMES_DIR = RAW_DATA_DIR / 'games'
 RAW_FEED_DIR = RAW_DATA_DIR / 'feed'
+NICKNAMES_CACHE = RAW_DATA_DIR / 'nicknames.json'
 
 
 def ensure_raw_dirs():
     """Create raw data cache directories if they don't exist."""
     RAW_GAMES_DIR.mkdir(parents=True, exist_ok=True)
     RAW_FEED_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_nickname_cache() -> Dict[str, str]:
+    """Load cached player nicknames from disk."""
+    if NICKNAMES_CACHE.is_file():
+        try:
+            with open(NICKNAMES_CACHE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def save_nickname_cache(cache: Dict[str, str]):
+    """Save player nickname cache to disk."""
+    NICKNAMES_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    with open(NICKNAMES_CACHE, 'w') as f:
+        json.dump(cache, f, indent=2)
 
 
 # ===================================================================
@@ -480,13 +503,22 @@ def process_game_data(game: Dict, team_members: Dict[str, str],
             rn = rr.get('roundNumber')
             round_results_lookup[tid][rn] = rr
 
-    # Build round start times lookup
+    # Build round timing lookups
     round_start_times = {}
+    round_end_times = {}
+    round_timer_start_times = {}
     for rd in rounds:
         rn = rd.get('roundNumber')
-        st = rd.get('startTime')
-        if rn and st:
-            round_start_times[rn] = st
+        if rn:
+            st = rd.get('startTime')
+            et = rd.get('endTime')
+            tst = rd.get('timerStartTime')
+            if st:
+                round_start_times[rn] = st
+            if et:
+                round_end_times[rn] = et
+            if tst:
+                round_timer_start_times[rn] = tst
 
     # Count geocode lookups needed
     geocode_count = 0
@@ -524,10 +556,33 @@ def process_game_data(game: Dict, team_members: Dict[str, str],
         correct_region = CODE_TO_REGION.get(correct_country_code.upper(), 'Other') if correct_country_code else 'Other'
 
         round_start = round_start_times.get(round_num)
+        round_end = round_end_times.get(round_num)
+        timer_start = round_timer_start_times.get(round_num)
+
+        # Compute round duration
+        round_duration_sec = ''
+        if round_start and round_end:
+            try:
+                rs_dt = datetime.fromisoformat(round_start.replace('Z', '+00:00'))
+                re_dt = datetime.fromisoformat(round_end.replace('Z', '+00:00'))
+                round_duration_sec = round((re_dt - rs_dt).total_seconds(), 2)
+            except Exception:
+                round_duration_sec = ''
+
+        # Game won (shared for all players in this round)
+        def compute_game_won(tid):
+            if is_draw:
+                return 'draw'
+            elif winning_team_id:
+                return (tid == winning_team_id)
+            else:
+                team_obj = team_id_lookup.get(tid, {})
+                return team_obj.get('health', 0) > 0
 
         for team in teams:
             tid = team.get('id') or team.get('teamId', '')
             rr = round_results_lookup.get(tid, {}).get(round_num, {})
+            game_won = compute_game_won(tid)
 
             for player in team.get('players', []):
                 player_id = player.get('playerId')
@@ -541,49 +596,66 @@ def process_game_data(game: Dict, team_members: Dict[str, str],
                         guess_for_round = guess
                         break
 
-                if not guess_for_round:
-                    continue
+                if guess_for_round:
+                    # ---- GUESSED: player dropped a pin ----
+                    status = 'guessed'
+                    guess_lat = guess_for_round.get('lat')
+                    guess_lng = guess_for_round.get('lng')
+                    distance = guess_for_round.get('distance', 0)
+                    guess_score = guess_for_round.get('score', 0)
+                    is_team_best = guess_for_round.get('isTeamsBestGuessOnRound', False)
+                    guess_created_ts = guess_for_round.get('created', '')
 
-                guess_lat = guess_for_round.get('lat')
-                guess_lng = guess_for_round.get('lng')
-                distance = guess_for_round.get('distance', 0)
-                guess_score = guess_for_round.get('score', 0)
-                is_team_best = guess_for_round.get('isTeamsBestGuessOnRound', False)
+                    if guess_lat is None or guess_lng is None:
+                        continue
 
-                if guess_lat is None or guess_lng is None:
-                    continue
+                    # Time from round start to guess
+                    time_to_guess = 0.0
+                    if round_start and guess_created_ts:
+                        try:
+                            start_dt = datetime.fromisoformat(round_start.replace('Z', '+00:00'))
+                            guess_dt = datetime.fromisoformat(guess_created_ts.replace('Z', '+00:00'))
+                            time_to_guess = (guess_dt - start_dt).total_seconds()
+                        except Exception:
+                            time_to_guess = 0.0
 
-                # Time calculation
-                time_to_guess = 0.0
-                guess_created = guess_for_round.get('created')
-                if round_start and guess_created:
-                    try:
-                        start_dt = datetime.fromisoformat(round_start.replace('Z', '+00:00'))
-                        guess_dt = datetime.fromisoformat(guess_created.replace('Z', '+00:00'))
-                        time_to_guess = (guess_dt - start_dt).total_seconds()
-                    except Exception:
-                        time_to_guess = 0.0
+                    # Time remaining when guess submitted (higher = clicked earlier)
+                    time_remaining = 0.0
+                    if round_end and guess_created_ts:
+                        try:
+                            end_dt = datetime.fromisoformat(round_end.replace('Z', '+00:00'))
+                            guess_dt = datetime.fromisoformat(guess_created_ts.replace('Z', '+00:00'))
+                            time_remaining = (end_dt - guess_dt).total_seconds()
+                        except Exception:
+                            time_remaining = 0.0
 
-                # Geocode guessed country (skip for opponents in my-team-only mode)
-                if my_team_only and is_opponent:
+                    # Geocode guessed country
+                    if my_team_only and is_opponent:
+                        guessed_country = ''
+                    else:
+                        guessed_country = normalize_country_name(
+                            geocoder.get_country(guess_lat, guess_lng) or 'Unknown'
+                        )
+
+                    # Correct country flag
+                    if guessed_country and guessed_country not in ('', 'Unknown', 'Lost at Sea') and correct_country not in ('Unknown',):
+                        correct_flag = (guessed_country == correct_country)
+                    else:
+                        correct_flag = ''
+
+                else:
+                    # ---- NO PIN: player did not guess ----
+                    status = 'no_pin'
+                    guess_lat = ''
+                    guess_lng = ''
+                    distance = ''
+                    guess_score = 0
+                    is_team_best = False
+                    guess_created_ts = ''
+                    time_to_guess = ''
+                    time_remaining = 0.0
                     guessed_country = ''
-                else:
-                    guessed_country = geocoder.get_country(guess_lat, guess_lng) or 'Unknown'
-
-                # Correct country flag
-                if guessed_country and guessed_country not in ('', 'Unknown', 'Lost at Sea') and correct_country not in ('Unknown',):
-                    correct_flag = (guessed_country == correct_country)
-                else:
                     correct_flag = ''
-
-                # Game won
-                if is_draw:
-                    game_won = 'draw'
-                elif winning_team_id:
-                    game_won = (tid == winning_team_id)
-                else:
-                    team_obj = team_id_lookup.get(tid, {})
-                    game_won = team_obj.get('health', 0) > 0
 
                 raw_rows.append({
                     'team_key': team_key,
@@ -595,9 +667,9 @@ def process_game_data(game: Dict, team_members: Dict[str, str],
                     'move_mode': move_mode,
                     'player_id': player_id,
                     'player_name': player_name,
-                    'time_seconds': round(time_to_guess, 2),
-                    'distance_meters': round(distance, 2),
-                    'distance_km': round(distance / 1000, 2),
+                    'time_seconds': round(time_to_guess, 2) if isinstance(time_to_guess, float) else '',
+                    'distance_meters': round(distance, 2) if isinstance(distance, (int, float)) else '',
+                    'distance_km': round(distance / 1000, 2) if isinstance(distance, (int, float)) else '',
                     'score': guess_score,
                     'correct_lat': correct_lat,
                     'correct_lng': correct_lng,
@@ -616,34 +688,57 @@ def process_game_data(game: Dict, team_members: Dict[str, str],
                     'health_after': rr.get('healthAfter', ''),
                     'damage_dealt': rr.get('damageDealt', ''),
                     'multiplier': rr.get('multiplier', ''),
+                    # Initiative & timing columns
+                    'guess_created': guess_created_ts,
+                    'round_start_time': round_start or '',
+                    'round_end_time': round_end or '',
+                    'timer_start_time': timer_start or '',
+                    'round_duration_sec': round_duration_sec,
+                    'time_remaining_sec': round(time_remaining, 2) if isinstance(time_remaining, float) else '',
+                    'clicked_first': False,  # computed below
+                    'status': status,
                     '_team_id': tid,  # internal, stripped before output
                 })
 
-    # ---- Compute won_team and won_round ----
-    by_round = defaultdict(list)
+    # ---- Compute won_team, won_round, and clicked_first ----
+    by_game_round = defaultdict(list)
     for row in raw_rows:
-        by_round[row['round']].append(row)
+        by_game_round[(row['game_id'], row['round'])].append(row)
 
-    for round_num, round_rows in by_round.items():
+    for (gid, round_num), round_rows in by_game_round.items():
         if not round_rows:
             continue
 
-        # won_round: best distance across ALL players
-        best_overall = min(r['distance_meters'] for r in round_rows)
-        for r in round_rows:
-            if r['distance_meters'] <= best_overall:
-                r['won_round'] = True
+        # won_round: best distance across ALL players who guessed
+        guessed_rows = [r for r in round_rows if r['status'] == 'guessed' and r['distance_meters'] != '']
+        if guessed_rows:
+            best_overall = min(r['distance_meters'] for r in guessed_rows)
+            for r in guessed_rows:
+                if r['distance_meters'] <= best_overall:
+                    r['won_round'] = True
 
-        # won_team: best distance within each team
+        # won_team: best distance within each team (guessed only)
         by_team = defaultdict(list)
         for r in round_rows:
             by_team[r['_team_id']].append(r)
 
         for tid, team_rows in by_team.items():
-            best_team = min(r['distance_meters'] for r in team_rows)
-            for r in team_rows:
-                if r['distance_meters'] <= best_team:
-                    r['won_team'] = True
+            team_guessed = [r for r in team_rows if r['status'] == 'guessed' and r['distance_meters'] != '']
+            if team_guessed:
+                best_team = min(r['distance_meters'] for r in team_guessed)
+                for r in team_guessed:
+                    if r['distance_meters'] <= best_team:
+                        r['won_team'] = True
+
+            # clicked_first: within each team, who had highest time_remaining?
+            team_with_time = [r for r in team_rows
+                              if r['status'] == 'guessed' and r['time_remaining_sec'] != ''
+                              and isinstance(r['time_remaining_sec'], (int, float))]
+            if team_with_time:
+                max_remaining = max(r['time_remaining_sec'] for r in team_with_time)
+                for r in team_with_time:
+                    if r['time_remaining_sec'] >= max_remaining:
+                        r['clicked_first'] = True
 
     # ---- Filter & clean ----
     output_rows = []
@@ -1063,19 +1158,39 @@ def main():
                     all_team_members[pid] = pid
 
     # ================================================================
-    # Phase 2: Fetch player nicknames (needed for team display)
+    # Phase 2: Fetch player nicknames (with disk cache)
     # ================================================================
-    players_without_names = [pid for pid, name in all_team_members.items() if pid == name]
+    nickname_cache = load_nickname_cache()
+
+    # Apply cached nicknames first
+    cached_count = 0
+    for pid in list(all_team_members.keys()):
+        if pid in nickname_cache:
+            all_team_members[pid] = nickname_cache[pid]
+            cached_count += 1
+
+    # Only fetch nicknames we don't have cached
+    players_without_names = [pid for pid, name in all_team_members.items()
+                             if pid == name and pid not in nickname_cache]
     if players_without_names:
-        print(f"\n\U0001f465 Fetching nicknames for {len(players_without_names)} players...")
+        print(f"\n\U0001f465 Fetching nicknames for {len(players_without_names)} new players"
+              f" ({cached_count} cached)...")
+        new_fetched = 0
         for player_id in players_without_names:
             try:
                 pprofile = api.get_player_profile(player_id)
                 nickname = pprofile.get('nick', player_id)
                 all_team_members[player_id] = nickname
+                nickname_cache[player_id] = nickname
+                new_fetched += 1
                 time.sleep(0.2)
             except Exception:
                 pass
+        # Save updated cache
+        save_nickname_cache(nickname_cache)
+        print(f"   Cached {new_fetched} new nicknames (total: {len(nickname_cache)})")
+    elif cached_count > 0:
+        print(f"\n\U0001f465 Loaded {cached_count} player nicknames from cache")
 
     # ================================================================
     # Phase 3: Discover teams
@@ -1324,7 +1439,7 @@ def main():
         latest_data = {
             "latest_export_dir": str(export_dir),
             "export_id": export_id,
-            "created_at": datetime.utcnow().isoformat() + 'Z',
+            "created_at": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             "csv_file": str(export_csv),
             "total_rows": len(all_rows),
             "total_games": len(set(r['game_id'] for r in all_rows)),
