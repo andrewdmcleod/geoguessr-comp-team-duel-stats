@@ -131,10 +131,14 @@ class TestInitiativeSummary:
         assert bob['clicked_first'] == 1
         assert bob['initiative_rate'] == 33.3
 
-    def test_returns_none_without_status(self, df_initiative):
+    def test_works_without_status_column(self, df_initiative):
+        """Without status column, initiative_summary still works by inferring from rows."""
         df = df_initiative.drop(columns=['status'])
         result = initiative_summary(df)
-        assert result is None
+        assert result is not None
+        assert len(result) == 3  # Team + 2 players
+        # clicked_first should still work (column is present)
+        assert result.iloc[0]['player_name'] == 'Team'
 
 
 class TestGuessTimeByRegion:
