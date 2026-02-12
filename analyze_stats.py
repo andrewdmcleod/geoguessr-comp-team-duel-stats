@@ -30,6 +30,11 @@ from country_codes import LARGE_COUNTRIES
 def detect_my_team(df: pd.DataFrame) -> set:
     """Detect which players are on 'my team' using the most common team_key.
 
+    The team_key format is '{player_id_1}_{player_id_2}' where each player_id
+    is a 24-character hex string and they are sorted alphabetically.
+    We parse the player IDs directly from the team_key rather than collecting
+    all player_ids from matching rows (which would include opponents).
+
     Returns set of player_ids belonging to the primary team.
     """
     if 'team_key' not in df.columns:
@@ -40,8 +45,18 @@ def detect_my_team(df: pd.DataFrame) -> set:
         return set(df['player_id'].unique())
 
     my_team_key = team_keys.index[0]
-    my_team_pids = set(df[df['team_key'] == my_team_key]['player_id'].unique())
-    return my_team_pids
+
+    # Parse player IDs from team_key (format: "id1_id2", each id is 24 hex chars)
+    if len(my_team_key) == 49 and my_team_key[24] == '_':
+        return {my_team_key[:24], my_team_key[25:]}
+
+    # Fallback: split on underscore (works if IDs don't contain underscores)
+    parts = my_team_key.split('_')
+    if len(parts) == 2:
+        return set(parts)
+
+    # Last resort: return all player_ids from rows with this team_key
+    return set(df[df['team_key'] == my_team_key]['player_id'].unique())
 
 
 def load_data(csv_file: str) -> pd.DataFrame:

@@ -71,10 +71,28 @@ def df_initiative():
 
 
 class TestDetectMyTeam:
-    def test_detects_team_from_team_key(self, df_initiative):
+    def test_detects_team_from_short_team_key(self, df_initiative):
         pids = detect_my_team(df_initiative)
-        assert 'pa' in pids
-        assert 'pb' in pids
+        assert pids == {'pa', 'pb'}
+
+    def test_excludes_opponents_with_same_team_key(self):
+        """Opponent rows share the same team_key but should not be included."""
+        pid_a = '5f705c262172ba000196ddbd'
+        pid_b = '695c3de0900ad6bdf176304f'
+        pid_opp = 'aaaaaaaaaaaaaaaaaaaaaa00'
+        team_key = f'{pid_a}_{pid_b}'
+        data = [
+            {'game_id': 'g1', 'round': 1, 'player_id': pid_a,
+             'player_name': 'Alice', 'team_key': team_key},
+            {'game_id': 'g1', 'round': 1, 'player_id': pid_b,
+             'player_name': 'Bob', 'team_key': team_key},
+            {'game_id': 'g1', 'round': 1, 'player_id': pid_opp,
+             'player_name': 'Opponent', 'team_key': team_key},
+        ]
+        df = pd.DataFrame(data)
+        pids = detect_my_team(df)
+        assert pids == {pid_a, pid_b}
+        assert pid_opp not in pids
 
     def test_fallback_without_team_key(self, df_initiative):
         df = df_initiative.drop(columns=['team_key'])
