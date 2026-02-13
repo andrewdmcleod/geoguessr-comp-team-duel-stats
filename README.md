@@ -205,28 +205,34 @@ The analysis script outputs:
 
 | Section | Description |
 |---------|-------------|
-| **Player Summary** | Games, rounds, avg distance/time, country accuracy per player |
+| **Player Summary — Distance** | Avg/median/best/worst distance, std dev, country accuracy per player |
+| **Player Summary — Timing** | Avg/median time (active clicks only), no-pin count per player |
 | **Accuracy Ranking** | Players ranked by average distance |
-| **Speed Ranking** | Players ranked by average time (excludes timeouts and no-pin guesses) |
-| **Speed vs Accuracy** | Efficiency score combining time and distance per player |
-| **Recent vs All-Time** | Last 10 games vs all-time stats with 📈/📉 trend indicators per player |
-| **Team Stats Summary** | Avg/worst distance and avg time, split by win vs loss |
-| **Player Win/Loss Split** | Avg distance in wins vs losses per player |
+| **Speed Ranking** | Players ranked by average time (excludes auto-submissions and no-pin) |
+| **Speed vs Accuracy** | Combined rank score (time rank + distance rank) per player |
+| **Recent vs All-Time** | Last 10 games vs all-time stats with colored ● trend indicators |
+| **Team Stats Summary** | Avg/worst distance and avg time, split by win vs loss and move mode |
+| **Player Win/Loss Split** | Avg distance in wins vs losses, with correct/incorrect country breakdown |
 | **Won Team** | % of rounds each player beat their teammate (+ team aggregate row) |
 | **Won Round** | % of rounds each player had the best guess overall (+ by move mode) |
-| **Region Performance** | Average distance per player per continent (+ team aggregate row) |
-| **Move vs No-Move** | Distance, time, and accuracy comparison across game modes (+ team row) |
-| **Countries I Confuse** | "When it was X, I guessed Y" — top 10 per player (+ team aggregate) |
-| **Best/Worst Countries** | Per player, countries with best/worst average distance (min 3 guesses, + team) |
-| **Countries Worth Studying** | Importance-weighted: avg distance × log(frequency) for large countries |
-| **Competitive Advantage** | Countries where you outperform opponents (and vice versa) |
+| **Region Performance** | Team: distance as % of region span. Players: avg km per continent |
+| **Move vs No-Move** | Distance, time, and accuracy across game modes (team rows first) |
+| **Countries I Confuse** | "When it was X, I guessed Y" — top 10 per player (team first) |
+| **Closest/Furthest Countries** | Best/worst avg distance per country (min 3 guesses, team first) |
+| **Best/Worst In-Country** | Closest/furthest when correct country was guessed (team first) |
+| **Countries Worth Studying** | Importance score 0–100: (avg_dist / area) × log(1 + frequency) |
+| **Competitive Advantage** | Countries you dominate vs opponents dominate, sorted by opponent distance |
 | **Rounds Played Trend** | Avg rounds per game, avg rounds in wins vs losses |
-| **Initiative Summary** | Who clicks first, participation rates, no-pin counts per player |
-| **No-Pin Analysis** | Rounds where player didn't drop a pin: frequency, loss rate |
+| **Initiative Summary** | Who clicks first (derived from timing), participation rates, no-pin counts |
+| **No-Pin Analysis** | No-pin frequency and round loss % when no pin dropped |
 | **Guess Speed by Region** | Avg time remaining when guess submitted, per region per player |
 | **Fastest/Slowest Guesses** | Top N quickest and slowest individual guesses |
 | **Hesitation Index** | Gap between first and last guess per round (team coordination metric) |
 | **Pressure Response** | Avg distance after winning vs losing the previous round |
+
+> **Backward compatibility:** The analysis engine works with both 30-column (pre-v0.3.0) and 38-column CSVs. For older CSVs, initiative metrics are derived from `time_seconds` spread, and no-pin rounds are detected from missing player rows. Timing-only sections (guess speed by region, hesitation index) require 38-column data.
+
+> **Timing model:** In competitive team duels, one player clicks "Guess" which starts a 15-second countdown. Other players can click within that window or their pin is auto-submitted at round end. `time_remaining_sec` = round_end − guess_created (higher = clicked earlier, ≈0 = auto-submitted). Speed/timing stats exclude auto-submissions (time_remaining < 1s).
 
 ## CSV Columns
 
@@ -243,7 +249,7 @@ The exported CSV contains 38 columns:
 | `move_mode` | Movement mode (move, no-move, NMPZ) |
 | `player_id` | Player's GeoGuessr ID |
 | `player_name` | Player's display name |
-| `time_seconds` | Time taken for the guess |
+| `time_seconds` | Elapsed time from round start to guess submission (per-player) |
 | `distance_meters` | Distance from correct location (meters) |
 | `distance_km` | Distance from correct location (km) |
 | `score` | Score points for this guess |
@@ -425,10 +431,11 @@ This creates three normalized tables: `games`, `rounds`, and `guesses` with prop
 
 ## Known Limitations
 
-- The GeoGuessr API only provides each player's **final guess position**. There is no way to distinguish between clicking "Guess" vs timer expiry, or first pin drop vs final pin position.
+- The GeoGuessr API provides each player's **final guess position** and timing data. The `time_remaining_sec` field (round_end - guess_created) lets us distinguish active clicks (≥1s remaining) from auto-submissions (~0s remaining), but we can't distinguish first pin drop vs final pin position.
 - Geocoding accuracy depends on the provider. Ocean/water guesses may show as "Lost at Sea".
 - The session cookie expires periodically and needs to be refreshed manually.
 - Only **team duel** games are fetched. Other game modes (battle royale, classic, etc.) are not supported.
+- For older CSV data (30-column format without initiative columns), the analysis engine derives `clicked_first` from `time_seconds` spread and detects no-pin rounds from missing rows. Full timing metrics require re-exporting with v0.3.0.
 
 ## License
 
