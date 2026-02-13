@@ -1,0 +1,7 @@
+{
+  "ignore_game_ids": [
+    "6979e2ca003396cee073c24b",
+    "6963db3b3137693efd1bc3c6"
+  ],
+  "reason": "Known bad/incomplete games for analysis"
+}

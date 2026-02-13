@@ -16,6 +16,8 @@ Fetch and analyze your competitive team duel games from GeoGuessr. Exports detai
 - **Initiative/timing metrics** — who clicks first, no-pin tracking, guess speed analysis, hesitation index
 - **Game drilldown** — per-game round-by-round analysis with `game_detail.py`
 - **Comprehensive analysis** with per-player, per-country, per-region breakdowns and team aggregate rows
+- **Country flag emoji** 🇫🇷 🇯🇵 🇺🇸 next to country names in all country-based analysis sections
+- **Game exclusion filters** — skip early learning games or specific bad game IDs
 - **Trend export** to JSON for feeding into LLMs for deeper trend analysis
 - **Grafana dashboard** via Docker Compose with auto-provisioned PostgreSQL, configurable via `.env`
 
@@ -158,12 +160,20 @@ python analyze_stats.py team_duels.csv
 # Filter analysis to a specific player
 python analyze_stats.py team_duels.csv --player YOUR_PLAYER_ID
 
+# Exclude first 20 games (learning phase)
+python analyze_stats.py team_duels.csv --exclude-first-n-games 20
+
+# Exclude specific bad/incomplete games
+python analyze_stats.py team_duels.csv --ignore-games-file ignore_games.json
+
 # Export analysis tables as CSV files
 python analyze_stats.py team_duels.csv --export analysis_output/
 
 # Export chronological trend data as JSON (for LLM analysis)
 python analyze_stats.py team_duels.csv --trend-export trends.json
 ```
+
+> **Game exclusion:** Use `--exclude-first-n-games N` to skip early learning-phase games, or `--ignore-games-file path.json` to exclude specific game IDs. See [`ignore_games.example.json`](ignore_games.example.json) for the JSON format. Both filters apply before all analysis.
 
 ### Game drilldown
 
@@ -206,16 +216,15 @@ The analysis script outputs:
 | Section | Description |
 |---------|-------------|
 | **Player Summary — Distance** | Avg/median/best/worst distance, std dev, country accuracy per player |
-| **Player Summary — Timing** | Avg/median time (active clicks only), no-pin count per player |
+| **Player Summary — Timing** | Avg/median time (active clicks only), no-pin count, clicked-first rate, guess rate |
 | **Accuracy Ranking** | Players ranked by average distance |
-| **Speed Ranking** | Players ranked by average time (excludes auto-submissions and no-pin) |
-| **Speed vs Accuracy** | Combined rank score (time rank + distance rank) per player |
+| **Speed vs Accuracy** | Combined rank (time_rank + dist_rank), per-player, excludes no-pin and auto-submissions |
 | **Recent vs All-Time** | Last 10 games vs all-time stats with colored ● trend indicators |
 | **Team Stats Summary** | Avg/worst distance and avg time, split by win vs loss and move mode |
 | **Player Win/Loss Split** | Avg distance in wins vs losses, with correct/incorrect country breakdown |
 | **Won Team** | % of rounds each player beat their teammate (+ team aggregate row) |
 | **Won Round** | % of rounds each player had the best guess overall (+ by move mode) |
-| **Region Performance** | Team: distance as % of region span. Players: avg km per continent |
+| **Region Performance** | Team: distance as % of region span. Players: avg km per continent. Detail: rounds, avg, median |
 | **Move vs No-Move** | Distance, time, and accuracy across game modes (team rows first) |
 | **Countries I Confuse** | "When it was X, I guessed Y" — top 10 per player (team first) |
 | **Closest/Furthest Countries** | Best/worst avg distance per country (min 3 guesses, team first) |

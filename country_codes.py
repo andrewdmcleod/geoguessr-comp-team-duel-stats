@@ -291,6 +291,32 @@ def normalize_country_name(name: str) -> str:
     return COUNTRY_ALIASES.get(name, name)
 
 
+def flag_emoji(code: str) -> str:
+    """Convert a 2-letter ISO country code to its flag emoji.
+
+    Uses regional indicator symbols: 'US' → 🇺🇸, 'FR' → 🇫🇷.
+    Returns empty string for invalid codes.
+    """
+    if not code or len(code) != 2:
+        return ''
+    code = code.upper()
+    return ''.join(chr(0x1F1E6 + ord(c) - ord('A')) for c in code)
+
+
+def country_with_flag(name: str) -> str:
+    """Prepend a country's flag emoji to its name.
+
+    Looks up the ISO code from the country name, converts to flag emoji.
+    Returns the original name unchanged if no code is found.
+    """
+    if not name or name in ('Unknown', 'Lost at Sea', ''):
+        return name
+    code = COUNTRY_NAME_TO_CODE.get(name)
+    if code:
+        return f'{flag_emoji(code)} {name}'
+    return name
+
+
 # Maps each country code to its continent/region
 CODE_TO_REGION = {
     'AD': 'Europe',

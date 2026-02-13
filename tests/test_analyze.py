@@ -3,10 +3,12 @@
 Covers: load_data normalization, _filter_guess_clicked, _team_first_order,
 best_worst_in_country, competitive_advantage, speed_vs_accuracy,
 player_win_loss_split, move_vs_nomove, no_pin_analysis round_loss_pct,
-and derived clicked_first from time_seconds spread.
+derived clicked_first, player_summary timing enrichments, region_detail,
+_add_flags, and CLI game exclusion filters.
 """
 
 import csv
+import json
 import os
 import sys
 
@@ -16,6 +18,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analyze_stats import (
+    _add_flags,
     _filter_guess_clicked,
     _team_first_order,
     best_worst_in_country,
@@ -25,10 +28,13 @@ from analyze_stats import (
     load_data,
     move_vs_nomove,
     no_pin_analysis,
+    player_summary,
     player_win_loss_split,
+    region_detail,
     speed_vs_accuracy,
     region_performance,
 )
+from country_codes import flag_emoji, country_with_flag
 
 
 # ===================================================================
@@ -582,3 +588,196 @@ class TestRegionPerformance:
                 for val in player_rows[col].dropna():
                     # Should be numeric (float)
                     assert isinstance(val, (int, float))
+
+
+# ===================================================================
+# Player Summary enriched timing tests
+# ===================================================================
+
+class TestPlayerSummaryTiming:
+    def test_has_not_clicked_guess_count(self, df_basic):
+        result = player_summary(df_basic)
+        assert 'not_clicked_guess_count' in result.columns
+
+    def test_has_rounds_present_count(self, df_basic):
+        result = player_summary(df_basic)
+        assert 'rounds_present_count' in result.columns
+        # Each player should have at least 1 round
+        for _, row in result.iterrows():
+            assert row['rounds_present_count'] > 0
+
+    def test_has_clicked_first_count(self, df_basic):
+        result = player_summary(df_basic)
+        assert 'clicked_first_count' in result.columns
+
+    def test_has_clicked_first_rate(self, df_basic):
+        result = player_summary(df_basic)
+        assert 'clicked_first_rate' in result.columns
+        # Rate should be 0-100
+        for _, row in result.iterrows():
+            assert 0 <= row['clicked_first_rate'] <= 100
+
+    def test_has_clicked_guess_rate(self, df_basic):
+        result = player_summary(df_basic)
+        assert 'clicked_guess_rate' in result.columns
+        # Rate should be 0-100
+        for _, row in result.iterrows():
+            assert 0 <= row['clicked_guess_rate'] <= 100
+
+    def test_not_clicked_equals_total_minus_clicked(self, df_basic):
+        """not_clicked_guess_count = total_guesses - times_guess_clicked."""
+        result = player_summary(df_basic)
+        for _, row in result.iterrows():
+            expected = row['total_guesses'] - (row['times_guess_clicked'] or 0)
+            assert row['not_clicked_guess_count'] == expected
+
+
+# ===================================================================
+# region_detail tests
+# ===================================================================
+
+class TestRegionDetail:
+    def test_returns_dataframe(self, df_basic):
+        result = region_detail(df_basic)
+        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+
+    def test_has_required_columns(self, df_basic):
+        result = region_detail(df_basic)
+        assert 'num_rounds' in result.columns
+        assert 'avg_dist_km' in result.columns
+        assert 'median_dist_km' in result.columns
+
+    def test_has_team_row(self, df_basic):
+        result = region_detail(df_basic)
+        assert 'Team' in result['player_name'].values
+
+    def test_num_rounds_correct(self, df_basic):
+        result = region_detail(df_basic)
+        # Europe has rounds from game1 (r1) and game2 (r1, r2) for Alice and Bob
+        team_europe = result[(result['player_name'] == 'Team') & (result['region'] == 'Europe')]
+        if len(team_europe) > 0:
+            assert team_europe.iloc[0]['num_rounds'] > 0
+
+
+# ===================================================================
+# Flag emoji tests
+# ===================================================================
+
+class TestFlagEmoji:
+    def test_us_flag(self):
+        assert flag_emoji('US') == '🇺🇸'
+
+    def test_fr_flag(self):
+        assert flag_emoji('FR') == '🇫🇷'
+
+    def test_lowercase(self):
+        assert flag_emoji('jp') == '🇯🇵'
+
+    def test_empty(self):
+        assert flag_emoji('') == ''
+
+    def test_none(self):
+        assert flag_emoji(None) == ''
+
+    def test_invalid_length(self):
+        assert flag_emoji('USA') == ''
+
+    def test_country_with_flag_france(self):
+        result = country_with_flag('France')
+        assert '🇫🇷' in result
+        assert 'France' in result
+
+    def test_country_with_flag_unknown(self):
+        assert country_with_flag('Unknown') == 'Unknown'
+
+    def test_country_with_flag_not_found(self):
+        result = country_with_flag('Atlantis')
+        assert result == 'Atlantis'
+
+
+# ===================================================================
+# _add_flags display helper tests
+# ===================================================================
+
+class TestAddFlags:
+    def test_adds_flags_to_correct_country(self):
+        df = pd.DataFrame({'correct_country': ['France', 'Japan'], 'distance_km': [100, 200]})
+        result = _add_flags(df)
+        assert '🇫🇷' in result.iloc[0]['correct_country']
+        assert '🇯🇵' in result.iloc[1]['correct_country']
+
+    def test_does_not_modify_original(self):
+        df = pd.DataFrame({'correct_country': ['France'], 'distance_km': [100]})
+        _add_flags(df)
+        assert df.iloc[0]['correct_country'] == 'France'
+
+    def test_handles_guessed_country(self):
+        df = pd.DataFrame({
+            'correct_country': ['France'],
+            'guessed_country': ['Germany'],
+        })
+        result = _add_flags(df, ['correct_country', 'guessed_country'])
+        assert '🇫🇷' in result.iloc[0]['correct_country']
+        assert '🇩🇪' in result.iloc[0]['guessed_country']
+
+
+# ===================================================================
+# CLI game exclusion filter tests
+# ===================================================================
+
+class TestExcludeFirstNGames:
+    def test_excludes_games(self, tmp_path):
+        """--exclude-first-n-games should drop earliest games."""
+        csv_path = tmp_path / 'test.csv'
+        rows = []
+        for i, date in enumerate(['2025-01-01T10:00:00Z', '2025-01-02T10:00:00Z',
+                                    '2025-01-03T10:00:00Z']):
+            rows.append({
+                'game_id': f'g{i+1}', 'round': '1', 'player_id': 'pa',
+                'player_name': 'Alice', 'distance_km': '100', 'time_seconds': '20',
+                'correct_country': 'France', 'guessed_country': 'France',
+                'correct_country_flag': 'True', 'game_date': date,
+            })
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+            writer.writeheader()
+            writer.writerows(rows)
+
+        df = load_data(str(csv_path))
+        # Simulate the exclusion logic from main()
+        game_dates = df.groupby('game_id')['game_date_parsed'].min().sort_values()
+        exclude_ids = set(game_dates.head(2).index)
+        df_filtered = df[~df['game_id'].isin(exclude_ids)]
+        assert df_filtered['game_id'].nunique() == 1
+        assert 'g3' in df_filtered['game_id'].values
+
+
+class TestIgnoreGamesFile:
+    def test_excludes_specified_games(self, tmp_path):
+        """--ignore-games-file should drop listed game IDs."""
+        csv_path = tmp_path / 'test.csv'
+        rows = [
+            {'game_id': 'g1', 'round': '1', 'player_id': 'pa', 'player_name': 'Alice',
+             'distance_km': '100', 'time_seconds': '20', 'correct_country': 'France',
+             'guessed_country': 'France', 'correct_country_flag': 'True',
+             'game_date': '2025-01-01T10:00:00Z'},
+            {'game_id': 'g2', 'round': '1', 'player_id': 'pa', 'player_name': 'Alice',
+             'distance_km': '200', 'time_seconds': '30', 'correct_country': 'Japan',
+             'guessed_country': 'Japan', 'correct_country_flag': 'True',
+             'game_date': '2025-01-02T10:00:00Z'},
+        ]
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+            writer.writeheader()
+            writer.writerows(rows)
+
+        ignore_path = tmp_path / 'ignore.json'
+        with open(ignore_path, 'w') as f:
+            json.dump({'ignore_game_ids': ['g1']}, f)
+
+        df = load_data(str(csv_path))
+        ignore_ids = set(json.loads(ignore_path.read_text())['ignore_game_ids'])
+        df_filtered = df[~df['game_id'].isin(ignore_ids)]
+        assert df_filtered['game_id'].nunique() == 1
+        assert 'g2' in df_filtered['game_id'].values

@@ -20,7 +20,7 @@ from typing import Optional
 from datetime import datetime
 import sys
 
-from country_codes import LARGE_COUNTRIES, normalize_country_name
+from country_codes import LARGE_COUNTRIES, normalize_country_name, country_with_flag
 
 
 # Approximate land area per region/continent in km² (for normalizing distance metrics)
@@ -118,6 +118,9 @@ def load_data(csv_file: str) -> pd.DataFrame:
 # Analysis functions
 # ===================================================================
 
+_filter_logged = False
+
+
 def _filter_guess_clicked(df: pd.DataFrame) -> pd.DataFrame:
     """Filter to rows where the player actively clicked guess (not auto pin-drop).
 
@@ -132,11 +135,16 @@ def _filter_guess_clicked(df: pd.DataFrame) -> pd.DataFrame:
       they were all auto-submitted at round end. However, without time_remaining_sec
       we can't reliably distinguish individual clicks, so we include all rows.
     """
+    global _filter_logged
     if 'time_remaining_sec' in df.columns:
         tr = pd.to_numeric(df['time_remaining_sec'], errors='coerce')
         mask = tr >= 1
         if mask.any():
-            return df[mask]
+            filtered = df[mask]
+            if not _filter_logged:
+                print(f"   Filtered to {len(filtered)}/{len(df)} guess-clicked rows (time_remaining >= 1s)")
+                _filter_logged = True
+            return filtered
     # Without time_remaining_sec, we can't reliably distinguish — return all rows
     return df
 
@@ -193,6 +201,65 @@ def player_summary(df: pd.DataFrame) -> pd.DataFrame:
     nopin_df.index.name = 'player_id'
     summary = summary.join(nopin_df, on='player_id', how='left')
     summary['no_pin_count'] = summary['no_pin_count'].fillna(0).astype(int)
+
+    # Compute not_clicked_guess_count = total_guesses - times_guess_clicked
+    if 'times_guess_clicked' in summary.columns:
+        summary['not_clicked_guess_count'] = (
+            summary['total_guesses'] - summary['times_guess_clicked'].fillna(0)
+        ).astype(int)
+    else:
+        summary['not_clicked_guess_count'] = 0
+
+    # Compute rounds_present_count = number of (game_id, round) pairs per player
+    rounds_present = {}
+    for pid in dist_stats.index.get_level_values('player_id').unique():
+        player_games = df[df['player_id'] == pid]['game_id'].unique()
+        total_slots = sum(len(all_rounds.get(g, [])) for g in player_games)
+        rounds_present[pid] = total_slots
+    rounds_present_s = pd.Series(rounds_present, name='rounds_present_count')
+    rounds_present_df = rounds_present_s.to_frame()
+    rounds_present_df.index.name = 'player_id'
+    summary = summary.join(rounds_present_df, on='player_id', how='left')
+    summary['rounds_present_count'] = summary['rounds_present_count'].fillna(0).astype(int)
+
+    # Derive clicked_first_count from timing data
+    has_clicked = 'clicked_first' in df.columns and df['clicked_first'].notna().any()
+    clicked_first_counts = {}
+    df_temp = df.copy()
+    if has_clicked:
+        df_temp['_cf'] = df_temp['clicked_first'].apply(
+            lambda x: True if str(x).strip() == 'True' else False)
+    elif 'time_seconds' in df_temp.columns:
+        df_temp['_cf'] = False
+        for (gid, rnd), rdf in df_temp.groupby(['game_id', 'round']):
+            if len(rdf) < 2:
+                continue
+            spread = rdf['time_seconds'].max() - rdf['time_seconds'].min()
+            if spread < 0.5:
+                continue
+            min_time = rdf['time_seconds'].min()
+            first_idx = rdf[rdf['time_seconds'] == min_time].index[0]
+            df_temp.loc[first_idx, '_cf'] = True
+    else:
+        df_temp['_cf'] = False
+
+    guessed = df_temp[df_temp['status'] == 'guessed'] if 'status' in df_temp.columns else df_temp
+    for pid in dist_stats.index.get_level_values('player_id').unique():
+        clicked_first_counts[pid] = int(guessed[(guessed['player_id'] == pid) & (guessed['_cf'] == True)].shape[0])
+    cf_s = pd.Series(clicked_first_counts, name='clicked_first_count')
+    cf_df = cf_s.to_frame()
+    cf_df.index.name = 'player_id'
+    summary = summary.join(cf_df, on='player_id', how='left')
+    summary['clicked_first_count'] = summary['clicked_first_count'].fillna(0).astype(int)
+
+    # Rates
+    summary['clicked_first_rate'] = (
+        summary['clicked_first_count'] / summary['rounds_present_count'].clip(lower=1) * 100
+    ).round(1)
+    tgc = summary['times_guess_clicked'].fillna(0)
+    summary['clicked_guess_rate'] = (
+        tgc / summary['rounds_present_count'].clip(lower=1) * 100
+    ).round(1)
 
     # Add correct country % if available
     if 'correct_country_flag' in df.columns:
@@ -433,6 +500,34 @@ def region_performance(df: pd.DataFrame, team_name: str = 'Team') -> pd.DataFram
     player_pivot = perf.pivot(index='player_name', columns='region', values='avg_distance_km')
 
     return pd.concat([team_row, player_pivot])
+
+
+def region_detail(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Detailed region performance: num_rounds, avg, median per player + team."""
+    if 'region' not in df.columns:
+        return None
+
+    df_valid = df[df['region'].notna() & (df['region'] != 'Unknown') & (df['region'] != 'Other')]
+    if len(df_valid) == 0:
+        return None
+
+    # Per-player stats
+    detail = df_valid.groupby(['player_name', 'region']).agg(
+        num_rounds=('distance_km', 'count'),
+        avg_dist_km=('distance_km', 'mean'),
+        median_dist_km=('distance_km', 'median'),
+    ).round(1).reset_index()
+
+    # Team aggregate
+    team_detail = df_valid.groupby('region').agg(
+        num_rounds=('distance_km', 'count'),
+        avg_dist_km=('distance_km', 'mean'),
+        median_dist_km=('distance_km', 'median'),
+    ).round(1).reset_index()
+    team_detail.insert(0, 'player_name', 'Team')
+
+    result = pd.concat([team_detail, detail], ignore_index=True)
+    return result.sort_values(['region', 'player_name'])
 
 
 def best_worst_countries(df: pd.DataFrame, n: int = 10, team_name: str = 'Team') -> tuple:
@@ -866,6 +961,7 @@ def initiative_summary(df: pd.DataFrame, team_name: str = 'Team') -> Optional[pd
         # Derive clicked_first from time_seconds: in each round, the player
         # with the lowest time_seconds clicked first (submitted earliest).
         # If all players have the same time (within 0.5s), nobody clicked.
+        print("   Deriving clicked_first from time_seconds spread (no clicked_first column)")
         df['_clicked_first'] = False
         if 'time_seconds' in df.columns:
             for (gid, rnd), rdf in df.groupby(['game_id', 'round']):
@@ -1283,6 +1379,21 @@ def print_section(title: str, subtitle: str = ''):
     print("=" * 60)
 
 
+def _add_flags(df: pd.DataFrame, cols: list = None) -> pd.DataFrame:
+    """Add flag emoji to country name columns for display purposes.
+
+    Returns a copy — doesn't modify the original DataFrame.
+    """
+    if cols is None:
+        cols = [c for c in ['correct_country', 'guessed_country'] if c in df.columns]
+    display = df.copy()
+    for col in cols:
+        if col in display.columns:
+            display[col] = display[col].apply(
+                lambda x: country_with_flag(x) if pd.notna(x) and x else x)
+    return display
+
+
 def _team_first_order(names, team_name: str = 'Team') -> list:
     """Return names with team_name first, then remaining sorted alphabetically."""
     others = sorted([n for n in names if n != team_name])
@@ -1298,6 +1409,10 @@ def main():
     parser.add_argument('--export', help='Export analysis to CSV files in this directory')
     parser.add_argument('--trend-export', type=str, default=None,
                         help='Export chronological trend data to JSON for LLM analysis')
+    parser.add_argument('--exclude-first-n-games', type=int, default=0,
+                        help='Exclude the first N games chronologically (e.g. learning phase)')
+    parser.add_argument('--ignore-games-file', type=str, default=None,
+                        help='JSON file with game IDs to exclude (see ignore_games.example.json)')
     args = parser.parse_args()
 
     print("\U0001f4ca GeoGuessr Team Duel Stats Analysis")
@@ -1305,6 +1420,26 @@ def main():
 
     df_all = load_data(args.csv_file)
     print(f"\n\u2705 Loaded {len(df_all)} guesses from {df_all['game_id'].nunique()} games")
+
+    # Apply game exclusion filters
+    if args.ignore_games_file:
+        with open(args.ignore_games_file) as f:
+            ignore_data = json.load(f)
+        ignore_ids = set(ignore_data.get('ignore_game_ids', []))
+        matched = df_all['game_id'].isin(ignore_ids)
+        n_ignored = df_all.loc[matched, 'game_id'].nunique()
+        df_all = df_all[~matched]
+        if n_ignored > 0:
+            print(f"   Excluded {n_ignored} ignored game(s) via {args.ignore_games_file}")
+
+    if args.exclude_first_n_games > 0 and 'game_date_parsed' in df_all.columns:
+        game_dates = df_all.groupby('game_id')['game_date_parsed'].min().sort_values()
+        exclude_ids = set(game_dates.head(args.exclude_first_n_games).index)
+        n_before = len(df_all)
+        df_all = df_all[~df_all['game_id'].isin(exclude_ids)]
+        n_excluded = n_before - len(df_all)
+        print(f"   Excluded first {args.exclude_first_n_games} games ({n_excluded} rows)")
+        print(f"   Analyzing {df_all['game_id'].nunique()} games remaining")
 
     # Filter to my team only (opponents only used for competitive_advantage)
     my_team_pids = detect_my_team(df_all)
@@ -1326,9 +1461,12 @@ def main():
     print(summary[dist_cols].to_string(index=False))
 
     other_cols = ['player_name', 'avg_time_sec', 'median_time_sec',
-                  'times_guess_clicked', 'no_pin_count']
+                  'times_guess_clicked', 'not_clicked_guess_count', 'no_pin_count',
+                  'rounds_present_count', 'clicked_first_count',
+                  'clicked_first_rate', 'clicked_guess_rate']
     other_cols = [c for c in other_cols if c in summary.columns]
-    print_section("\U0001f4c8 PLAYER SUMMARY — TIMING")
+    print_section("\U0001f4c8 PLAYER SUMMARY — TIMING",
+                  "time stats exclude auto-submissions (time_remaining < 1s)")
     print(summary[other_cols].to_string(index=False))
 
     # ---- Accuracy Ranking ----
@@ -1336,14 +1474,9 @@ def main():
     acc_rank = accuracy_ranking(df)
     print(acc_rank.to_string(index=False))
 
-    # ---- Speed Ranking ----
-    print_section("\u26a1 SPEED RANKING", "by average time in seconds, lower is faster")
-    speed_rank = speed_ranking(df)
-    if not speed_rank.empty:
-        print(speed_rank.to_string(index=False))
-
     # ---- Speed vs Accuracy ----
-    print_section("\u2696\ufe0f  SPEED VS ACCURACY")
+    print_section("\u2696\ufe0f  SPEED VS ACCURACY",
+                  "per-player guesses (excludes no-pin + auto-submissions). combined_rank = time_rank + dist_rank, lower = better")
     efficiency = speed_vs_accuracy(df)
     if not efficiency.empty:
         print(efficiency.to_string(index=False))
@@ -1410,6 +1543,11 @@ def main():
     if not region_perf.empty:
         print(region_perf.round(1).to_string())
 
+    reg_detail = region_detail(df)
+    if reg_detail is not None:
+        print(f"\n  Region detail (rounds, avg, median):")
+        print(reg_detail.to_string(index=False))
+
     # ---- Move vs No-Move ----
     mvm = move_vs_nomove(df)
     if mvm is not None:
@@ -1427,7 +1565,8 @@ def main():
         for player in _team_first_order(top_per_player['player_name'].unique(), 'Team'):
             pdata = top_per_player[top_per_player['player_name'] == player]
             print(f"\n  {player}:")
-            print(pdata[['correct_country', 'guessed_country', 'times']].to_string(index=False))
+            display = _add_flags(pdata, ['correct_country', 'guessed_country'])
+            print(display[['correct_country', 'guessed_country', 'times']].to_string(index=False))
 
     # ---- Closest/Furthest Countries (all guesses) ----
     best, worst = best_worst_countries(df, n=10)
@@ -1436,13 +1575,15 @@ def main():
         for player in _team_first_order(best['player_name'].unique(), 'Team'):
             pdata = best[best['player_name'] == player]
             print(f"\n  {player}:")
-            print(pdata[['correct_country', 'avg_dist_km', 'num_guesses']].to_string(index=False))
+            display = _add_flags(pdata)
+            print(display[['correct_country', 'avg_dist_km', 'num_guesses']].to_string(index=False))
     if not worst.empty:
         print_section("\U0001f4a9 FURTHEST COUNTRIES", "highest avg distance (all guesses), min 3 guesses")
         for player in _team_first_order(worst['player_name'].unique(), 'Team'):
             pdata = worst[worst['player_name'] == player]
             print(f"\n  {player}:")
-            print(pdata[['correct_country', 'avg_dist_km', 'num_guesses']].to_string(index=False))
+            display = _add_flags(pdata)
+            print(display[['correct_country', 'avg_dist_km', 'num_guesses']].to_string(index=False))
 
     # ---- Best/Worst In-Country (correct country only) ----
     bic, wic = best_worst_in_country(df, n=10)
@@ -1451,20 +1592,22 @@ def main():
         for player in _team_first_order(bic['player_name'].unique(), 'Team'):
             pdata = bic[bic['player_name'] == player]
             print(f"\n  {player}:")
-            print(pdata[['correct_country', 'avg_dist_km', 'num_correct']].to_string(index=False))
+            display = _add_flags(pdata)
+            print(display[['correct_country', 'avg_dist_km', 'num_correct']].to_string(index=False))
     if not wic.empty:
         print_section("\U0001f4cd WORST IN-COUNTRY", "furthest from location when we got the right country, min 3")
         for player in _team_first_order(wic['player_name'].unique(), 'Team'):
             pdata = wic[wic['player_name'] == player]
             print(f"\n  {player}:")
-            print(pdata[['correct_country', 'avg_dist_km', 'num_correct']].to_string(index=False))
+            display = _add_flags(pdata)
+            print(display[['correct_country', 'avg_dist_km', 'num_correct']].to_string(index=False))
 
     # ---- Countries Worth Studying ----
     worth = countries_worth_studying(df)
     if not worth.empty:
         print_section("\U0001f4d6 COUNTRIES WORTH STUDYING",
                       "importance = (avg_dist_km / area_km2) * log(1 + num_guesses)")
-        print(worth.to_string(index=False))
+        print(_add_flags(worth).to_string(index=False))
 
     # ---- Competitive Advantage ----
     comp_adv = competitive_advantage(df_all)
@@ -1475,14 +1618,14 @@ def main():
         our_wins = comp_adv[comp_adv['advantage_km'] > 0].sort_values('opp_avg_dist', ascending=False)
         if len(our_wins) > 0:
             print(f"\n  Countries we dominate (top {min(5, len(our_wins))}, by opponent distance):")
-            print(our_wins.head(5).to_string(index=False))
+            print(_add_flags(our_wins.head(5)).to_string(index=False))
         else:
             print("\n  No countries where we outperform opponents (need more opponent data)")
         # Countries we LOSE: advantage_km < 0, sorted by opp distance asc (they were closest)
         our_losses = comp_adv[comp_adv['advantage_km'] < 0].sort_values('opp_avg_dist', ascending=True)
         if len(our_losses) > 0:
             print(f"\n  Countries opponents dominate (top {min(5, len(our_losses))}, by opponent distance):")
-            print(our_losses.head(5).to_string(index=False))
+            print(_add_flags(our_losses.head(5)).to_string(index=False))
 
     # ---- Rounds Played Trend ----
     rpt = rounds_played_trend(df)
@@ -1566,8 +1709,6 @@ def main():
 
         summary.to_csv(export_dir / 'player_summary.csv', index=False)
         acc_rank.to_csv(export_dir / 'accuracy_ranking.csv', index=False)
-        if not speed_rank.empty:
-            speed_rank.to_csv(export_dir / 'speed_ranking.csv', index=False)
         if not efficiency.empty:
             efficiency.to_csv(export_dir / 'speed_vs_accuracy.csv', index=False)
         if not region_perf.empty:
